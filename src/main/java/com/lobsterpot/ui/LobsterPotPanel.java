@@ -1,27 +1,25 @@
 package com.lobsterpot.ui;
 
-import com.lobsterpot.LobsterPotConfig;
-import com.lobsterpot.SessionManager;
-import com.lobsterpot.api.ApiCallback;
-import com.lobsterpot.api.LobsterPotApiClient;
-import com.lobsterpot.api.model.ClanEvent;
-import com.lobsterpot.api.model.LoginResponse;
-import com.lobsterpot.api.model.NewsPost;
-import com.lobsterpot.api.model.Profile;
-import com.lobsterpot.api.model.RankAvailable;
-import com.lobsterpot.api.model.RankClaimResponse;
-import com.lobsterpot.api.model.RankInfo;
+import com.lobsterpot.ClanMembershipService;
+import com.lobsterpot.ClanMembershipService.ClanAccess;
+import com.lobsterpot.feed.FeedBroadcast;
+import com.lobsterpot.feed.FeedEvent;
+import com.lobsterpot.feed.FeedMember;
+import com.lobsterpot.feed.FeedNextRank;
+import com.lobsterpot.feed.FeedPendingClaim;
+import com.lobsterpot.feed.PluginFeed;
 import java.awt.BorderLayout;
 import java.awt.Color;
 import java.awt.Component;
 import java.awt.Dimension;
 import java.awt.GridLayout;
 import java.awt.Rectangle;
+import java.awt.event.ActionListener;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
-import java.text.NumberFormat;
 import java.util.List;
 import java.util.Locale;
 import javax.inject.Inject;
@@ -30,15 +28,10 @@ import javax.swing.BorderFactory;
 import javax.swing.BoxLayout;
 import javax.swing.JButton;
 import javax.swing.JLabel;
-import javax.swing.JOptionPane;
 import javax.swing.JPanel;
-import javax.swing.JPasswordField;
 import javax.swing.JScrollPane;
-import javax.swing.JTextArea;
-import javax.swing.JTextField;
 import javax.swing.Scrollable;
 import javax.swing.SwingConstants;
-import javax.swing.SwingUtilities;
 import net.runelite.client.ui.ColorScheme;
 import net.runelite.client.ui.FontManager;
 import net.runelite.client.ui.PluginPanel;
@@ -47,79 +40,94 @@ import net.runelite.client.ui.laf.RuneLiteScrollBarUI;
 @Singleton
 public class LobsterPotPanel extends PluginPanel
 {
-	private static final Color MET_COLOR = new Color(0x4CAF50);
-	private static final Color UNMET_COLOR = new Color(0xE53935);
-	private static final Color ACCENT_COLOR = ColorScheme.BRAND_ORANGE;
+	private static final Color ALLOWED_COLOR = new Color(0x4CAF50);
+	private static final Color DENIED_COLOR = new Color(0xE53935);
 	private static final Color HEADING_COLOR = Color.WHITE;
 	private static final Color VALUE_COLOR = Color.WHITE;
 	private static final Color KEY_COLOR = new Color(0x9E9E9E);
-	/** Width (px) to wrap labels to; fits the 225px plugin panel minus our insets and the scrollbar. */
 	private static final int WRAP_WIDTH = 150;
-	/** Narrower wrap for text inside cards, which add their own horizontal padding. */
 	private static final int CARD_WRAP_WIDTH = 142;
-	private static final NumberFormat NUMBER = NumberFormat.getIntegerInstance(Locale.ENGLISH);
-	private static final DateTimeFormatter DATE_FORMAT =
-		DateTimeFormatter.ofPattern("EEE d MMM, HH:mm", Locale.ENGLISH).withZone(ZoneId.systemDefault());
+	private static final DateTimeFormatter DATE_FORMAT = DateTimeFormatter.ofPattern("d MMM yyyy");
+	private static final DateTimeFormatter DATE_TIME_FORMAT =
+		DateTimeFormatter.ofPattern("EEE d MMM, HH:mm").withZone(ZoneId.systemDefault());
 
-	private final LobsterPotApiClient apiClient;
-	private final SessionManager session;
-	private final LobsterPotConfig config;
-
-	// Top-level views
 	private final JPanel scrollContent = new ScrollableContentPanel();
-	private final JPanel loginView = new JPanel();
-	private final JPanel memberView = new JPanel();
-
-	// Login view
-	private final JTextField usernameField = new JTextField(14);
-	private final JPasswordField passwordField = new JPasswordField(14);
-	private final JButton loginButton = new JButton("Log in");
-	private final JLabel loginStatus = new JLabel(" ");
-
-	// Member header
-	private final JLabel accountLabel = new JLabel();
-
-	// Rank section
-	private final JLabel rankStatus = new JLabel();
-	private final JLabel currentRank = field();
-	private final JLabel points = field();
-	private final JLabel nextRank = field();
-	private final JLabel eligibility = field();
-	private final JPanel reasons = new JPanel();
-
-	// Events / News
+	private final JLabel status = new JLabel();
+	private final JLabel player = field();
+	private final JLabel profileStatus = new JLabel();
+	private final JPanel profileList = new JPanel();
+	private final JLabel broadcastStatus = new JLabel();
+	private final JPanel broadcastList = new JPanel();
 	private final JLabel eventsStatus = new JLabel();
 	private final JPanel eventsList = new JPanel();
-	private final JLabel newsStatus = new JLabel();
-	private final JPanel newsList = new JPanel();
+	private final JButton refresh = new JButton("Refresh");
 
-	// Rank-up
-	private JPanel rankUpSection;
-	private final JButton rankUpButton = new JButton("Request rank-up");
-	private final JLabel rankUpStatus = new JLabel(" ");
-	private boolean hasPendingClaim;
+	private Runnable refreshAction = () -> {};
+	private String currentPlayerName;
+	private boolean currentAccessAllowed;
+	private PluginFeed currentFeed;
+	private String currentFeedError;
 
 	@Inject
-	public LobsterPotPanel(LobsterPotApiClient apiClient, SessionManager session, LobsterPotConfig config)
+	public LobsterPotPanel()
 	{
-		// Do not let PluginPanel wrap us in its own scroll pane; we provide our own (styled) one.
 		super(false);
-		this.apiClient = apiClient;
-		this.session = session;
-		this.config = config;
 	}
 
-	public void init()
+	public void init(Runnable refreshAction)
 	{
+		this.refreshAction = refreshAction;
+
+		removeAll();
 		setLayout(new BorderLayout());
 		setBackground(ColorScheme.DARK_GRAY_COLOR);
 
-		buildLoginView();
-		buildMemberView();
-
+		scrollContent.removeAll();
 		scrollContent.setBackground(ColorScheme.DARK_GRAY_COLOR);
-		// Extra right padding so content clears the overlay scrollbar that floats over the viewport.
 		scrollContent.setBorder(BorderFactory.createEmptyBorder(8, 8, 8, 14));
+
+		final JPanel main = new JPanel();
+		main.setLayout(new BoxLayout(main, BoxLayout.Y_AXIS));
+		main.setOpaque(false);
+		main.setAlignmentX(Component.LEFT_ALIGNMENT);
+		scrollContent.add(main, BorderLayout.NORTH);
+
+		final JLabel title = new JLabel("The Lobster Pot");
+		title.setFont(FontManager.getRunescapeBoldFont());
+		title.setForeground(ColorScheme.BRAND_ORANGE);
+		title.setAlignmentX(Component.LEFT_ALIGNMENT);
+		main.add(title);
+		main.add(verticalGap(8));
+
+		final JPanel accessSection = section("Clan access");
+		status.setAlignmentX(Component.LEFT_ALIGNMENT);
+		accessSection.add(status);
+		accessSection.add(verticalGap(8));
+		accessSection.add(requiredClanLine());
+		accessSection.add(verticalGap(2));
+		accessSection.add(player);
+		main.add(accessSection);
+		main.add(verticalGap(10));
+
+		main.add(buildProfileSection());
+		main.add(verticalGap(10));
+		main.add(buildBroadcastsSection());
+		main.add(verticalGap(10));
+		main.add(buildEventsSection());
+		main.add(verticalGap(10));
+
+		final JPanel buttons = new JPanel(new GridLayout(1, 1, 0, 0));
+		buttons.setOpaque(false);
+		buttons.setAlignmentX(Component.LEFT_ALIGNMENT);
+		refresh.setHorizontalAlignment(SwingConstants.CENTER);
+		for (ActionListener listener : refresh.getActionListeners())
+		{
+			refresh.removeActionListener(listener);
+		}
+		refresh.addActionListener(e -> this.refreshAction.run());
+		buttons.setMaximumSize(new Dimension(Integer.MAX_VALUE, refresh.getPreferredSize().height));
+		buttons.add(refresh);
+		main.add(buttons);
 
 		final JScrollPane scrollPane = new JScrollPane(scrollContent,
 			JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED, JScrollPane.HORIZONTAL_SCROLLBAR_NEVER);
@@ -131,212 +139,119 @@ public class LobsterPotPanel extends PluginPanel
 		scrollPane.getVerticalScrollBar().setUnitIncrement(16);
 		add(scrollPane, BorderLayout.CENTER);
 
-		session.addListener(() -> SwingUtilities.invokeLater(this::renderSession));
-		renderSession();
+		setChecking();
 	}
 
-	// ------------------------------------------------------------------ session/view switching
-
-	private void renderSession()
+	public void render(ClanAccess access)
 	{
-		scrollContent.removeAll();
-		if (session.isLoggedIn())
+		if (access == null)
 		{
-			accountLabel.setText("<html><div style='width:" + WRAP_WIDTH + "px'>Logged in as "
-				+ escape(safe(session.getUsername())) + "</div></html>");
-			scrollContent.add(memberView, BorderLayout.NORTH);
-			refreshAll();
-		}
-		else
-		{
-			loginStatus.setText(" ");
-			passwordField.setText("");
-			loginButton.setEnabled(true);
-			scrollContent.add(loginView, BorderLayout.NORTH);
-		}
-		scrollContent.revalidate();
-		scrollContent.repaint();
-	}
-
-	// ------------------------------------------------------------------ login view
-
-	private void buildLoginView()
-	{
-		loginView.setLayout(new BoxLayout(loginView, BoxLayout.Y_AXIS));
-		loginView.setBackground(ColorScheme.DARK_GRAY_COLOR);
-
-		final JLabel title = new JLabel("The Lobster Pot");
-		title.setFont(FontManager.getRunescapeBoldFont());
-		title.setForeground(ColorScheme.BRAND_ORANGE);
-		title.setAlignmentX(Component.LEFT_ALIGNMENT);
-		loginView.add(title);
-		loginView.add(verticalGap(8));
-
-		final JLabel hint = new JLabel("<html><body style='width:150px'>Log in with your clan website account.</body></html>");
-		hint.setForeground(Color.LIGHT_GRAY);
-		hint.setAlignmentX(Component.LEFT_ALIGNMENT);
-		loginView.add(hint);
-		loginView.add(verticalGap(8));
-
-		loginView.add(leftLabel("Username"));
-		usernameField.setAlignmentX(Component.LEFT_ALIGNMENT);
-		usernameField.setMaximumSize(new Dimension(Integer.MAX_VALUE, usernameField.getPreferredSize().height));
-		loginView.add(usernameField);
-		loginView.add(verticalGap(6));
-
-		loginView.add(leftLabel("Password"));
-		passwordField.setAlignmentX(Component.LEFT_ALIGNMENT);
-		passwordField.setMaximumSize(new Dimension(Integer.MAX_VALUE, passwordField.getPreferredSize().height));
-		passwordField.addActionListener(e -> doLogin());
-		loginView.add(passwordField);
-		loginView.add(verticalGap(8));
-
-		loginButton.setAlignmentX(Component.LEFT_ALIGNMENT);
-		loginButton.addActionListener(e -> doLogin());
-		loginView.add(loginButton);
-		loginView.add(verticalGap(4));
-
-		loginStatus.setForeground(UNMET_COLOR);
-		loginStatus.setAlignmentX(Component.LEFT_ALIGNMENT);
-		loginView.add(loginStatus);
-	}
-
-	private void doLogin()
-	{
-		final String username = usernameField.getText() == null ? "" : usernameField.getText().trim();
-		final char[] pw = passwordField.getPassword();
-		final String password = new String(pw);
-		java.util.Arrays.fill(pw, '\0');
-
-		if (username.isEmpty() || password.isEmpty())
-		{
-			setLoginStatus("Enter your username and password.", UNMET_COLOR);
-			return;
-		}
-		if (!apiClient.isConfigured())
-		{
-			setLoginStatus("Clan API URL is not set in plugin settings.", UNMET_COLOR);
+			setChecking();
 			return;
 		}
 
-		loginButton.setEnabled(false);
-		setLoginStatus("Signing in…", Color.LIGHT_GRAY);
-		apiClient.login(username, password, new ApiCallback<LoginResponse>()
-		{
-			@Override
-			public void onSuccess(LoginResponse result)
-			{
-				if (result == null || result.getAccessToken() == null)
-				{
-					SwingUtilities.invokeLater(() ->
-					{
-						setLoginStatus("Login failed: empty response.", UNMET_COLOR);
-						loginButton.setEnabled(true);
-					});
-					return;
-				}
-				// applyLogin fires the session listener, which switches to the member view on the EDT.
-				session.applyLogin(result);
-			}
+		status.setForeground(access.isAllowed() ? ALLOWED_COLOR : DENIED_COLOR);
+		status.setText(wrapped(access.getMessage()));
+		currentPlayerName = access.getPlayerName();
+		currentAccessAllowed = access.isAllowed();
+		setInfo(player, "Character:", valueOrUnknown(access.getPlayerName()));
+		showProfile();
 
-			@Override
-			public void onFailure(String error, int httpCode)
-			{
-				SwingUtilities.invokeLater(() ->
-				{
-					setLoginStatus(error, UNMET_COLOR);
-					loginButton.setEnabled(true);
-				});
-			}
-		});
+		revalidate();
+		repaint();
 	}
 
-	// ------------------------------------------------------------------ member view
-
-	private void buildMemberView()
+	public void setFeedLoading()
 	{
-		memberView.setLayout(new BoxLayout(memberView, BoxLayout.Y_AXIS));
-		memberView.setBackground(ColorScheme.DARK_GRAY_COLOR);
-
-		final JLabel title = new JLabel("The Lobster Pot");
-		title.setFont(FontManager.getRunescapeBoldFont());
-		title.setForeground(ColorScheme.BRAND_ORANGE);
-		title.setAlignmentX(Component.LEFT_ALIGNMENT);
-		memberView.add(title);
-		memberView.add(verticalGap(4));
-
-		accountLabel.setForeground(VALUE_COLOR);
-		accountLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
-		memberView.add(accountLabel);
-		memberView.add(verticalGap(6));
-
-		final JButton refresh = new JButton("Refresh");
-		refresh.setHorizontalAlignment(SwingConstants.CENTER);
-		refresh.addActionListener(e -> refreshAll());
-		final JButton logout = new JButton("Log out");
-		logout.setHorizontalAlignment(SwingConstants.CENTER);
-		logout.addActionListener(e -> session.clear());
-
-		final JPanel buttons = new JPanel(new GridLayout(1, 2, 8, 0));
-		buttons.setOpaque(false);
-		buttons.setAlignmentX(Component.LEFT_ALIGNMENT);
-		// Constrain height so the BoxLayout doesn't stretch the buttons tall.
-		buttons.setMaximumSize(new Dimension(Integer.MAX_VALUE, refresh.getPreferredSize().height));
-		buttons.add(refresh);
-		buttons.add(logout);
-		memberView.add(buttons);
-		memberView.add(verticalGap(10));
-
-		memberView.add(buildRankSection());
-		memberView.add(verticalGap(10));
-		memberView.add(buildRankUpSection());
-		memberView.add(verticalGap(10));
-		memberView.add(buildEventsSection());
-		memberView.add(verticalGap(10));
-		memberView.add(buildNewsSection());
+		currentFeed = null;
+		currentFeedError = null;
+		setProfileMessage("Loading clan profile...");
+		setBroadcastsMessage("Loading broadcasts...");
+		setEventsMessage("Loading events...");
 	}
 
-	private JPanel buildRankSection()
+	public void clearFeed(String message)
 	{
-		final JPanel section = section("Rank progress");
-		rankStatus.setForeground(Color.LIGHT_GRAY);
-		section.add(rankStatus);
+		currentFeed = null;
+		currentFeedError = message;
+		setProfileMessage(message);
+		setBroadcastsMessage(message);
+		setEventsMessage(message);
+	}
 
-		for (JLabel line : new JLabel[]{currentRank, points, nextRank, eligibility})
+	public void renderFeed(PluginFeed feed, String error)
+	{
+		currentFeed = feed;
+		currentFeedError = error;
+
+		if (error != null)
 		{
-			line.setAlignmentX(Component.LEFT_ALIGNMENT);
-			section.add(line);
-			section.add(verticalGap(2));
+			setProfileMessage(error);
+			setBroadcastsMessage(error);
+			setEventsMessage(error);
+			return;
+		}
+		if (feed == null)
+		{
+			setProfileMessage("No feed loaded.");
+			setBroadcastsMessage("No feed loaded.");
+			setEventsMessage("No feed loaded.");
+			return;
 		}
 
-		reasons.setLayout(new BoxLayout(reasons, BoxLayout.Y_AXIS));
-		reasons.setOpaque(false);
-		reasons.setAlignmentX(Component.LEFT_ALIGNMENT);
-		reasons.setBorder(BorderFactory.createEmptyBorder(4, 0, 0, 0));
-		section.add(reasons);
+		showProfile();
+		showBroadcasts(feed.getBroadcasts());
+		showEvents(feed.getEvents());
+	}
+
+	private void setChecking()
+	{
+		currentPlayerName = null;
+		currentAccessAllowed = false;
+		status.setForeground(Color.LIGHT_GRAY);
+		status.setText(wrapped("Checking clan membership..."));
+		setInfo(player, "Character:", "Unknown");
+		setProfileMessage("Log in to view your clan profile.");
+	}
+
+	private static JLabel requiredClanLine()
+	{
+		final JLabel label = field();
+		setInfo(label, "Required clan:", ClanMembershipService.REQUIRED_CLAN_NAME);
+		return label;
+	}
+
+	private JPanel buildProfileSection()
+	{
+		final JPanel section = section("Clan Profile");
+		profileStatus.setForeground(Color.LIGHT_GRAY);
+		profileStatus.setAlignmentX(Component.LEFT_ALIGNMENT);
+		section.add(profileStatus);
+		profileList.setLayout(new BoxLayout(profileList, BoxLayout.Y_AXIS));
+		profileList.setOpaque(false);
+		profileList.setAlignmentX(Component.LEFT_ALIGNMENT);
+		section.add(profileList);
 		return section;
 	}
 
-	private JPanel buildRankUpSection()
+	private JPanel buildBroadcastsSection()
 	{
-		final JPanel section = section("Request a rank-up");
-		rankUpButton.addActionListener(e -> onRankUpClicked());
-		rankUpButton.setAlignmentX(Component.LEFT_ALIGNMENT);
-		section.add(rankUpButton);
-		section.add(verticalGap(4));
-		rankUpStatus.setForeground(Color.LIGHT_GRAY);
-		rankUpStatus.setAlignmentX(Component.LEFT_ALIGNMENT);
-		section.add(rankUpStatus);
-		// Hidden until a rank-up is actually available (see showRankAvailable).
-		section.setVisible(false);
-		rankUpSection = section;
+		final JPanel section = section("Broadcasts");
+		broadcastStatus.setForeground(Color.LIGHT_GRAY);
+		broadcastStatus.setAlignmentX(Component.LEFT_ALIGNMENT);
+		section.add(broadcastStatus);
+		broadcastList.setLayout(new BoxLayout(broadcastList, BoxLayout.Y_AXIS));
+		broadcastList.setOpaque(false);
+		broadcastList.setAlignmentX(Component.LEFT_ALIGNMENT);
+		section.add(broadcastList);
 		return section;
 	}
 
 	private JPanel buildEventsSection()
 	{
-		final JPanel section = section("Upcoming events");
+		final JPanel section = section("Events");
 		eventsStatus.setForeground(Color.LIGHT_GRAY);
+		eventsStatus.setAlignmentX(Component.LEFT_ALIGNMENT);
 		section.add(eventsStatus);
 		eventsList.setLayout(new BoxLayout(eventsList, BoxLayout.Y_AXIS));
 		eventsList.setOpaque(false);
@@ -345,206 +260,141 @@ public class LobsterPotPanel extends PluginPanel
 		return section;
 	}
 
-	private JPanel buildNewsSection()
+	private void showProfile()
 	{
-		final JPanel section = section("News");
-		newsStatus.setForeground(Color.LIGHT_GRAY);
-		section.add(newsStatus);
-		newsList.setLayout(new BoxLayout(newsList, BoxLayout.Y_AXIS));
-		newsList.setOpaque(false);
-		newsList.setAlignmentX(Component.LEFT_ALIGNMENT);
-		section.add(newsList);
-		return section;
-	}
-
-	// ------------------------------------------------------------------ refresh
-
-	public void refreshAll()
-	{
-		if (!session.isLoggedIn())
+		profileList.removeAll();
+		if (currentFeedError != null)
 		{
+			setProfileMessage(currentFeedError);
 			return;
 		}
-		refreshRank();
-		refreshEvents();
-		refreshNews();
-	}
-
-	private void refreshRank()
-	{
-		setRankMessage("Loading…");
-		hasPendingClaim = false;
-		apiClient.getProfile(new ApiCallback<Profile>()
+		if (currentPlayerName == null || currentPlayerName.trim().isEmpty())
 		{
-			@Override
-			public void onSuccess(Profile profile)
-			{
-				SwingUtilities.invokeLater(() -> showProfile(profile));
-				// Rank eligibility comes from a second endpoint.
-				apiClient.getRankAvailable(new ApiCallback<RankAvailable>()
-				{
-					@Override
-					public void onSuccess(RankAvailable rank)
-					{
-						SwingUtilities.invokeLater(() -> showRankAvailable(rank));
-					}
-
-					@Override
-					public void onFailure(String error, int httpCode)
-					{
-						SwingUtilities.invokeLater(() -> nextRank.setText(error));
-					}
-				});
-			}
-
-			@Override
-			public void onFailure(String error, int httpCode)
-			{
-				setRankMessage(error);
-			}
-		});
-	}
-
-	private void refreshEvents()
-	{
-		setEventsMessage("Loading…");
-		apiClient.getUpcomingEvents(new ApiCallback<List<ClanEvent>>()
-		{
-			@Override
-			public void onSuccess(List<ClanEvent> events)
-			{
-				SwingUtilities.invokeLater(() -> showEvents(events));
-			}
-
-			@Override
-			public void onFailure(String error, int httpCode)
-			{
-				setEventsMessage(error);
-			}
-		});
-	}
-
-	private void refreshNews()
-	{
-		setNewsMessage("Loading…");
-		apiClient.getNews(new ApiCallback<List<NewsPost>>()
-		{
-			@Override
-			public void onSuccess(List<NewsPost> news)
-			{
-				SwingUtilities.invokeLater(() -> showNews(news));
-			}
-
-			@Override
-			public void onFailure(String error, int httpCode)
-			{
-				setNewsMessage(error);
-			}
-		});
-	}
-
-	// ------------------------------------------------------------------ rendering
-
-	private void showProfile(Profile p)
-	{
-		if (p == null)
-		{
-			setRankMessage("No profile returned.");
+			setProfileMessage("Log in to view your clan profile.");
 			return;
 		}
-		rankStatus.setText(" ");
-		setInfo(currentRank, "Current rank:", p.getCurrentRank() != null ? p.getCurrentRank().getName() : "Unknown", VALUE_COLOR);
-		setInfo(points, "Points:",
-			NUMBER.format(p.getPointsAvailable()) + " available · " + NUMBER.format(p.getPointsTotal()) + " earned",
-			VALUE_COLOR);
+		if (!currentAccessAllowed)
+		{
+			setProfileMessage("Available for LobsterPot clan members.");
+			return;
+		}
+		if (currentFeed == null)
+		{
+			setProfileMessage("Loading clan profile...");
+			return;
+		}
+
+		final FeedMember member = findMember(currentFeed, currentPlayerName);
+		if (member == null)
+		{
+			setProfileMessage("No clan profile found for " + currentPlayerName + ".");
+			return;
+		}
+
+		profileStatus.setText(" ");
+		profileList.add(profileRow(member));
 		revalidate();
 		repaint();
 	}
 
-	private void showRankAvailable(RankAvailable rank)
+	private JPanel profileRow(FeedMember member)
 	{
-		reasons.removeAll();
-		if (rank == null)
+		final JPanel row = card();
+		row.add(boldLine(valueOrUnknown(member.getRsn())));
+		row.add(grayLine("Rank: " + valueOrUnknown(firstNonBlank(member.getProgressionRank(), member.getBotRank()))));
+		row.add(grayLine("Join date: " + formatDateLike(member.getJoinDate())));
+		row.add(grayLine("Points: " + formatInt(member.getPointsAvailable()) + " available"));
+		row.add(grayLine(formatInt(member.getPointsTotal()) + " total / "
+			+ formatInt(member.getPointsSpent()) + " spent"));
+		row.add(grayLine("Time in clan: " + formatMonths(member.getMonthsInClan())));
+
+		addNextRank(row, member.getNextRank(), member.getPendingClaim());
+		addPendingClaims(row, member);
+		return row;
+	}
+
+	private void addNextRank(JPanel row, FeedNextRank nextRank, FeedPendingClaim pendingClaim)
+	{
+		if (nextRank == null)
 		{
-			nextRank.setText("—");
-			eligibility.setText("—");
+			row.add(grayLine("Next rank: Top rank reached"));
 			return;
 		}
 
-		final RankInfo next = rank.getNextRank();
-		if (next == null)
+		row.add(grayLine("Next rank: " + valueOrUnknown(nextRank.getName())));
+		row.add(grayLine("Needs: " + formatInt(nextRank.getPointCost()) + " points / "
+			+ formatMonths(nextRank.getMinMonths())));
+
+		if (Boolean.TRUE.equals(nextRank.getCanClaim()))
 		{
-			setInfo(nextRank, "Next rank:", "Max rank reached", VALUE_COLOR);
-		}
-		else
-		{
-			final StringBuilder sb = new StringBuilder(next.getName());
-			if (next.getPointCost() != null)
+			if (pendingClaim == null)
 			{
-				sb.append(" (").append(NUMBER.format(next.getPointCost())).append(" pts)");
+				row.add(wrappedCardLine("Eligible to claim " + valueOrUnknown(nextRank.getName()) + ".", ALLOWED_COLOR));
 			}
-			setInfo(nextRank, "Next rank:", sb.toString(), VALUE_COLOR);
-
-			if (next.getRequirementsDescription() != null && !next.getRequirementsDescription().isEmpty())
-			{
-				reasons.add(wrappedGray(next.getRequirementsDescription()));
-				reasons.add(verticalGap(4));
-			}
+			return;
 		}
 
-		setInfo(eligibility, "Eligible:", rank.isEligible() ? "Yes" : "Not yet", rank.isEligible() ? MET_COLOR : UNMET_COLOR);
-
-		final RankAvailable.Reasons r = rank.getReasons();
-		if (r != null && next != null)
+		final int missingPoints = positive(nextRank.getMissingPoints());
+		final int missingMonths = positive(nextRank.getMissingMonths());
+		if (missingPoints > 0 || missingMonths > 0)
 		{
-			reasons.add(reasonRow("Enough points", r.isEnoughPoints()));
-			reasons.add(reasonRow("Time in clan met", r.isEnoughTime()));
-			if (r.isAdminOnly())
-			{
-				final JLabel admin = new JLabel("Next rank is assigned by staff only");
-				admin.setForeground(UNMET_COLOR);
-				reasons.add(admin);
-			}
+			row.add(grayLine("Missing: " + formatInt(missingPoints) + " points / "
+				+ formatMonths(missingMonths)));
 		}
-
-		hasPendingClaim = rank.getPendingClaim() != null;
-		final boolean canRequest = config.enableRankRequests() && rank.isEligible() && next != null && !hasPendingClaim;
-
-		// Only show the rank-up request section when a rank-up is actually available to claim.
-		rankUpSection.setVisible(canRequest);
-		rankUpButton.setEnabled(canRequest);
-		if (canRequest)
+		if (nextRank.getRequirements() != null && !nextRank.getRequirements().trim().isEmpty())
 		{
-			rankUpStatus.setText(" ");
+			row.add(wrappedCardLine("Requirement: " + nextRank.getRequirements().trim(), KEY_COLOR));
+		}
+	}
+
+	private void addPendingClaims(JPanel row, FeedMember member)
+	{
+		final FeedPendingClaim pendingRank = member.getPendingClaim();
+		if (pendingRank != null)
+		{
+			row.add(wrappedCardLine("Rank claim pending: " + valueOrUnknown(pendingRank.getRank())
+				+ pendingDate(pendingRank.getCreatedAt()), ColorScheme.BRAND_ORANGE));
 		}
 
-		if (hasPendingClaim)
+		final FeedPendingClaim pendingJoinDate = member.getPendingJoinDateClaim();
+		if (pendingJoinDate != null)
 		{
-			rankStatus.setForeground(ACCENT_COLOR);
-			rankStatus.setText("<html><div style='width:" + WRAP_WIDTH + "px'>Rank-up request pending review.</div></html>");
+			row.add(wrappedCardLine("Join-date claim pending: "
+				+ formatDateLike(pendingJoinDate.getRequestedJoinDate())
+				+ pendingDate(pendingJoinDate.getCreatedAt()), ColorScheme.BRAND_ORANGE));
 		}
-		else
+	}
+
+	private void showBroadcasts(List<FeedBroadcast> broadcasts)
+	{
+		broadcastList.removeAll();
+		if (broadcasts == null || broadcasts.isEmpty())
 		{
-			rankStatus.setForeground(Color.LIGHT_GRAY);
-			rankStatus.setText(" ");
+			setBroadcastsMessage("No active broadcasts.");
+			return;
 		}
 
+		broadcastStatus.setText(" ");
+		for (FeedBroadcast broadcast : broadcasts)
+		{
+			broadcastList.add(broadcastRow(broadcast));
+			broadcastList.add(verticalGap(6));
+		}
 		revalidate();
 		repaint();
 	}
 
-	private void showEvents(List<ClanEvent> events)
+	private void showEvents(List<FeedEvent> events)
 	{
 		eventsList.removeAll();
 		if (events == null || events.isEmpty())
 		{
 			setEventsMessage("No upcoming events.");
-			revalidate();
-			repaint();
 			return;
 		}
+
 		eventsStatus.setText(" ");
-		for (ClanEvent event : events)
+		for (FeedEvent event : events)
 		{
 			eventsList.add(eventRow(event));
 			eventsList.add(verticalGap(6));
@@ -553,125 +403,49 @@ public class LobsterPotPanel extends PluginPanel
 		repaint();
 	}
 
-	private void showNews(List<NewsPost> news)
+	private JPanel broadcastRow(FeedBroadcast broadcast)
 	{
-		newsList.removeAll();
-		if (news == null || news.isEmpty())
+		final JPanel row = card();
+		row.add(boldLine(valueOrUnknown(broadcast.getTitle())));
+		row.add(wrappedCardLine(valueOrUnknown(broadcast.getMessage()), Color.LIGHT_GRAY));
+		if (broadcast.getExpiresAt() != null && !broadcast.getExpiresAt().trim().isEmpty())
 		{
-			setNewsMessage("No news yet.");
-			revalidate();
-			repaint();
-			return;
+			row.add(grayLine("Expires " + formatIso(broadcast.getExpiresAt())));
 		}
-		newsStatus.setText(" ");
-		for (NewsPost post : news)
-		{
-			newsList.add(newsRow(post));
-			newsList.add(verticalGap(6));
-		}
-		revalidate();
-		repaint();
-	}
-
-	private void onRankUpClicked()
-	{
-		if (!config.enableRankRequests() || hasPendingClaim)
-		{
-			return;
-		}
-
-		final JTextArea input = new JTextArea(5, 24);
-		input.setLineWrap(true);
-		input.setWrapStyleWord(true);
-		final int choice = JOptionPane.showConfirmDialog(this, new JScrollPane(input),
-			"Describe why you're eligible (proof / justification):",
-			JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
-		if (choice != JOptionPane.OK_OPTION)
-		{
-			return;
-		}
-
-		final String claimText = input.getText() == null ? "" : input.getText().trim();
-		if (claimText.isEmpty())
-		{
-			setRankUpStatus("Please include some justification.", UNMET_COLOR);
-			return;
-		}
-
-		rankUpButton.setEnabled(false);
-		setRankUpStatus("Submitting…", Color.LIGHT_GRAY);
-		apiClient.submitRankClaim(claimText, new ApiCallback<RankClaimResponse>()
-		{
-			@Override
-			public void onSuccess(RankClaimResponse response)
-			{
-				SwingUtilities.invokeLater(() ->
-				{
-					setRankUpStatus("Request submitted — staff will review it.", MET_COLOR);
-					refreshRank();
-				});
-			}
-
-			@Override
-			public void onFailure(String error, int httpCode)
-			{
-				SwingUtilities.invokeLater(() ->
-				{
-					setRankUpStatus(error, UNMET_COLOR);
-					rankUpButton.setEnabled(config.enableRankRequests() && !hasPendingClaim);
-				});
-			}
-		});
-	}
-
-	// ------------------------------------------------------------------ row builders
-
-	private JPanel reasonRow(String label, boolean met)
-	{
-		final JPanel row = new JPanel(new BorderLayout(6, 0));
-		row.setOpaque(false);
-		final JLabel mark = new JLabel(met ? "✓" : "✗");
-		mark.setForeground(met ? MET_COLOR : UNMET_COLOR);
-		final JLabel text = new JLabel("<html><div style='width:" + (WRAP_WIDTH - 18) + "px'>" + escape(label) + "</div></html>");
-		text.setForeground(Color.LIGHT_GRAY);
-		row.add(mark, BorderLayout.WEST);
-		row.add(text, BorderLayout.CENTER);
 		return row;
 	}
 
-	private JPanel eventRow(ClanEvent event)
+	private JPanel eventRow(FeedEvent event)
 	{
 		final JPanel row = card();
-		row.add(boldLine(event.getTitle()));
-		row.add(grayLine(formatWhen(event.getEventStart())));
-		if (event.getLocation() != null && !event.getLocation().isEmpty())
+		row.add(boldLine(valueOrUnknown(event.getTitle())));
+		row.add(grayLine(eventType(event)));
+		row.add(grayLine(formatIso(event.getStartsAt())));
+		if (event.getLocation() != null && !event.getLocation().trim().isEmpty())
 		{
 			row.add(grayLine("@ " + event.getLocation()));
 		}
-		return row;
-	}
-
-	private JPanel newsRow(NewsPost post)
-	{
-		final JPanel row = card();
-		row.add(boldLine(post.getTitle()));
-		row.add(grayLine(formatWhen(post.getCreatedAt())));
-		final String summary = post.getExcerpt() != null && !post.getExcerpt().isEmpty()
-			? post.getExcerpt() : post.getContent();
-		if (summary != null && !summary.isEmpty())
+		if (event.getDescription() != null && !event.getDescription().trim().isEmpty())
 		{
-			final JLabel body = new JLabel("<html><div style='width:" + CARD_WRAP_WIDTH + "px'>" + escape(summary) + "</div></html>");
-			body.setForeground(Color.LIGHT_GRAY);
-			body.setAlignmentX(Component.LEFT_ALIGNMENT);
-			row.add(body);
-			row.add(verticalGap(2));
+			row.add(wrappedCardLine(event.getDescription(), Color.LIGHT_GRAY));
 		}
 		return row;
 	}
 
-	// ------------------------------------------------------------------ small helpers
+	private static String eventType(FeedEvent event)
+	{
+		if ("skill_competition".equals(event.getType()))
+		{
+			return "Skill competition: " + valueOrUnknown(event.getMetricLabel());
+		}
+		if ("boss_competition".equals(event.getType()))
+		{
+			return "Boss competition: " + valueOrUnknown(event.getMetricLabel());
+		}
+		return "Clan event";
+	}
 
-	private JPanel card()
+	private static JPanel card()
 	{
 		final JPanel row = new JPanel();
 		row.setLayout(new BoxLayout(row, BoxLayout.Y_AXIS));
@@ -683,46 +457,49 @@ public class LobsterPotPanel extends PluginPanel
 
 	private static JLabel boldLine(String text)
 	{
-		final JLabel label = new JLabel("<html><div style='width:" + CARD_WRAP_WIDTH + "px'>" + escape(text) + "</div></html>");
+		final JLabel label = wrappedCardLine(text, HEADING_COLOR);
 		label.setFont(FontManager.getRunescapeBoldFont());
-		label.setForeground(HEADING_COLOR);
-		label.setAlignmentX(Component.LEFT_ALIGNMENT);
 		return label;
 	}
 
 	private static JLabel grayLine(String text)
 	{
+		return wrappedCardLine(text, KEY_COLOR);
+	}
+
+	private static JLabel wrappedCardLine(String text, Color color)
+	{
 		final JLabel label = new JLabel("<html><div style='width:" + CARD_WRAP_WIDTH + "px'>" + escape(text) + "</div></html>");
-		label.setForeground(KEY_COLOR);
+		label.setForeground(color);
 		label.setAlignmentX(Component.LEFT_ALIGNMENT);
-		label.setBorder(BorderFactory.createEmptyBorder(2, 0, 2, 0));
 		return label;
 	}
 
-	private static String formatWhen(String iso)
+	private void setBroadcastsMessage(String message)
 	{
-		if (iso == null || iso.isEmpty())
-		{
-			return "Date TBC";
-		}
-		try
-		{
-			return DATE_FORMAT.format(OffsetDateTime.parse(iso));
-		}
-		catch (Exception ignored)
-		{
-			try
-			{
-				return DATE_FORMAT.format(Instant.parse(iso));
-			}
-			catch (Exception alsoIgnored)
-			{
-				return iso;
-			}
-		}
+		broadcastList.removeAll();
+		broadcastStatus.setText(wrapped(message));
+		revalidate();
+		repaint();
 	}
 
-	private JPanel section(String heading)
+	private void setProfileMessage(String message)
+	{
+		profileList.removeAll();
+		profileStatus.setText(wrapped(message));
+		revalidate();
+		repaint();
+	}
+
+	private void setEventsMessage(String message)
+	{
+		eventsList.removeAll();
+		eventsStatus.setText(wrapped(message));
+		revalidate();
+		repaint();
+	}
+
+	private static JPanel section(String heading)
 	{
 		final JPanel section = new JPanel();
 		section.setLayout(new BoxLayout(section, BoxLayout.Y_AXIS));
@@ -741,39 +518,18 @@ public class LobsterPotPanel extends PluginPanel
 		return section;
 	}
 
-	/** Renders a wrapping "key value" line with a muted key and a coloured value. */
-	private static void setInfo(JLabel label, String key, String value, Color valueColor)
+	private static void setInfo(JLabel label, String key, String value)
 	{
 		label.setText("<html><div style='width:" + WRAP_WIDTH + "px'>"
 			+ "<span style='color:" + hex(KEY_COLOR) + "'>" + escape(key) + " </span>"
-			+ "<span style='color:" + hex(valueColor) + "'>" + escape(value) + "</span></div></html>");
-	}
-
-	private static JLabel wrappedGray(String text)
-	{
-		final JLabel label = new JLabel("<html><div style='width:" + WRAP_WIDTH + "px'>" + escape(text) + "</div></html>");
-		label.setForeground(KEY_COLOR);
-		label.setAlignmentX(Component.LEFT_ALIGNMENT);
-		return label;
-	}
-
-	private static String hex(Color color)
-	{
-		return String.format("#%06x", color.getRGB() & 0xFFFFFF);
-	}
-
-	private static JLabel leftLabel(String text)
-	{
-		final JLabel label = new JLabel(text);
-		label.setForeground(Color.GRAY);
-		label.setAlignmentX(Component.LEFT_ALIGNMENT);
-		return label;
+			+ "<span style='color:" + hex(VALUE_COLOR) + "'>" + escape(value) + "</span></div></html>");
 	}
 
 	private static JLabel field()
 	{
-		final JLabel label = new JLabel("—");
-		label.setForeground(Color.WHITE);
+		final JLabel label = new JLabel();
+		label.setForeground(VALUE_COLOR);
+		label.setAlignmentX(Component.LEFT_ALIGNMENT);
 		return label;
 	}
 
@@ -787,64 +543,129 @@ public class LobsterPotPanel extends PluginPanel
 		return spacer;
 	}
 
-	private void setRankMessage(String message)
+	private static String wrapped(String message)
 	{
-		SwingUtilities.invokeLater(() ->
+		return "<html><body style='width:" + WRAP_WIDTH + "px'>" + escape(message) + "</body></html>";
+	}
+
+	private static String valueOrUnknown(String value)
+	{
+		return value == null || value.trim().isEmpty() ? "Unknown" : value;
+	}
+
+	private static String formatDateLike(String value)
+	{
+		if (value == null || value.trim().isEmpty())
 		{
-			rankStatus.setForeground(Color.LIGHT_GRAY);
-			rankStatus.setText("<html><body style='width:150px'>" + escape(message) + "</body></html>");
-			currentRank.setText("—");
-			points.setText("—");
-			nextRank.setText("—");
-			eligibility.setText("—");
-			eligibility.setForeground(Color.WHITE);
-			reasons.removeAll();
-			if (rankUpSection != null)
+			return "Unknown";
+		}
+
+		final String trimmed = value.trim();
+		if (trimmed.length() >= 10)
+		{
+			try
 			{
-				rankUpSection.setVisible(false);
+				return DATE_FORMAT.format(LocalDate.parse(trimmed.substring(0, 10)));
 			}
-			revalidate();
-			repaint();
-		});
+			catch (Exception ignored)
+			{
+				return trimmed;
+			}
+		}
+		return trimmed;
 	}
 
-	private void setEventsMessage(String message)
+	private static String formatIso(String iso)
 	{
-		SwingUtilities.invokeLater(() ->
+		if (iso == null || iso.trim().isEmpty())
 		{
-			eventsList.removeAll();
-			eventsStatus.setText("<html><body style='width:150px'>" + escape(message) + "</body></html>");
-			revalidate();
-			repaint();
-		});
-	}
-
-	private void setNewsMessage(String message)
-	{
-		SwingUtilities.invokeLater(() ->
+			return "Date TBC";
+		}
+		try
 		{
-			newsList.removeAll();
-			newsStatus.setText("<html><body style='width:150px'>" + escape(message) + "</body></html>");
-			revalidate();
-			repaint();
-		});
+			return DATE_TIME_FORMAT.format(OffsetDateTime.parse(iso));
+		}
+		catch (Exception ignored)
+		{
+			try
+			{
+				return DATE_TIME_FORMAT.format(Instant.parse(iso));
+			}
+			catch (Exception alsoIgnored)
+			{
+				return iso;
+			}
+		}
 	}
 
-	private void setLoginStatus(String message, Color color)
+	private static FeedMember findMember(PluginFeed feed, String playerName)
 	{
-		loginStatus.setForeground(color);
-		loginStatus.setText("<html><body style='width:150px'>" + escape(message) + "</body></html>");
+		final String playerKey = rsnKey(playerName);
+		for (FeedMember member : feed.getMembers())
+		{
+			if (playerKey.equals(member.getRsnKey()) || playerKey.equals(rsnKey(member.getRsn())))
+			{
+				return member;
+			}
+		}
+		return null;
 	}
 
-	private void setRankUpStatus(String message, Color color)
+	private static String rsnKey(String rsn)
 	{
-		rankUpStatus.setForeground(color);
-		rankUpStatus.setText("<html><body style='width:150px'>" + escape(message) + "</body></html>");
+		if (rsn == null)
+		{
+			return "";
+		}
+
+		final StringBuilder sb = new StringBuilder(rsn.length());
+		for (int i = 0; i < rsn.length(); i++)
+		{
+			final char c = Character.toLowerCase(rsn.charAt(i));
+			if (c != ' ' && c != '_' && c != '-' && c != '\u00A0')
+			{
+				sb.append(c);
+			}
+		}
+		return sb.toString();
 	}
 
-	private static String safe(String s)
+	private static String firstNonBlank(String first, String second)
 	{
-		return s == null ? "" : s;
+		return first != null && !first.trim().isEmpty() ? first : second;
+	}
+
+	private static String formatInt(Integer value)
+	{
+		return String.format(Locale.US, "%,d", value == null ? 0 : value);
+	}
+
+	private static String formatMonths(Integer months)
+	{
+		if (months == null)
+		{
+			return "Unknown";
+		}
+		return months == 1 ? "1 month" : formatInt(months) + " months";
+	}
+
+	private static int positive(Integer value)
+	{
+		return value == null ? 0 : Math.max(0, value);
+	}
+
+	private static String pendingDate(String createdAt)
+	{
+		if (createdAt == null || createdAt.trim().isEmpty())
+		{
+			return "";
+		}
+		return " since " + formatDateLike(createdAt);
+	}
+
+	private static String hex(Color color)
+	{
+		return String.format("#%06x", color.getRGB() & 0xFFFFFF);
 	}
 
 	private static String escape(String s)
@@ -852,10 +673,6 @@ public class LobsterPotPanel extends PluginPanel
 		return s == null ? "" : s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
 	}
 
-	/**
-	 * Content panel that always matches the scroll viewport's width, so nothing overflows
-	 * horizontally (which would push the right padding under the scrollbar and clip content).
-	 */
 	private static final class ScrollableContentPanel extends JPanel implements Scrollable
 	{
 		ScrollableContentPanel()

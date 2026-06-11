@@ -1,23 +1,17 @@
 package com.lobsterpot;
 
 import com.google.inject.Provides;
-import com.lobsterpot.api.ApiCallback;
-import com.lobsterpot.api.LobsterPotApiClient;
-import com.lobsterpot.api.model.Broadcast;
+import com.lobsterpot.ClanMembershipService.ClanAccess;
+import com.lobsterpot.feed.PluginFeed;
+import com.lobsterpot.feed.PluginFeedClient;
 import com.lobsterpot.ui.LobsterPotPanel;
 import java.awt.image.BufferedImage;
-import java.util.List;
 import javax.inject.Inject;
-import lombok.extern.slf4j.Slf4j;
-import net.runelite.api.ChatMessageType;
-import net.runelite.api.Client;
+import javax.swing.SwingUtilities;
 import net.runelite.api.GameState;
+import net.runelite.api.events.ClanChannelChanged;
 import net.runelite.api.events.GameStateChanged;
 import net.runelite.client.callback.ClientThread;
-import net.runelite.client.chat.ChatColorType;
-import net.runelite.client.chat.ChatMessageBuilder;
-import net.runelite.client.chat.ChatMessageManager;
-import net.runelite.client.chat.QueuedMessage;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.plugins.Plugin;
@@ -26,16 +20,22 @@ import net.runelite.client.ui.ClientToolbar;
 import net.runelite.client.ui.NavigationButton;
 import net.runelite.client.util.ImageUtil;
 
-@Slf4j
 @PluginDescriptor(
 	name = "The Lobster Pot",
-	description = "Clan companion: view rank progress, request a rank-up, see upcoming events and news, and read the clan MOTD on login.",
-	tags = {"clan", "lobster", "pot", "rank", "events", "news", "motd", "broadcast"}
+	description = "Clan companion for LobsterPot members.",
+	tags = {"clan", "lobster", "pot"}
 )
 public class LobsterPotPlugin extends Plugin
 {
-	@Inject
-	private Client client;
+	private static final String[] LEGACY_CONFIG_KEYS = {
+		"apiBaseUrl",
+		"enableRankRequests",
+		"showMotdOnLogin",
+		"session.accessToken",
+		"session.refreshToken",
+		"session.expiresAt",
+		"session.username"
+	};
 
 	@Inject
 	private ClientThread clientThread;
@@ -44,29 +44,24 @@ public class LobsterPotPlugin extends Plugin
 	private ClientToolbar clientToolbar;
 
 	@Inject
-	private ChatMessageManager chatMessageManager;
+	private ConfigManager configManager;
 
 	@Inject
-	private LobsterPotConfig config;
+	private ClanMembershipService clanMembershipService;
 
 	@Inject
-	private LobsterPotApiClient apiClient;
-
-	@Inject
-	private SessionManager session;
+	private PluginFeedClient pluginFeedClient;
 
 	@Inject
 	private LobsterPotPanel panel;
 
 	private NavigationButton navButton;
 
-	/** Whether the MOTD has already been shown during the current game-login session. */
-	private boolean motdShown;
-
 	@Override
 	protected void startUp()
 	{
-		panel.init();
+		clearLegacyConfig();
+		panel.init(this::refreshAll);
 
 		final BufferedImage icon = ImageUtil.loadImageResource(getClass(), "/com/lobsterpot/icon.png");
 		navButton = NavigationButton.builder()
@@ -77,10 +72,7 @@ public class LobsterPotPlugin extends Plugin
 			.build();
 		clientToolbar.addNavigation(navButton);
 
-		// Show the MOTD if the member logs in (to the API) while already in-game this session.
-		session.addListener(this::maybeShowMotd);
-
-		maybeShowMotd();
+		refreshAll();
 	}
 
 	@Override
@@ -99,83 +91,62 @@ public class LobsterPotPlugin extends Plugin
 	@Subscribe
 	public void onGameStateChanged(GameStateChanged event)
 	{
-		switch (event.getGameState())
+		if (event.getGameState() == GameState.LOGGED_IN
+			|| event.getGameState() == GameState.LOGIN_SCREEN
+			|| event.getGameState() == GameState.HOPPING)
 		{
-			case LOGGED_IN:
-				maybeShowMotd();
-				break;
-			case LOGIN_SCREEN:
-			case HOPPING:
-				// New game-login session: allow the MOTD to show again.
-				motdShown = false;
-				break;
-			default:
-				break;
+			refreshAccess();
 		}
 	}
 
-	private void maybeShowMotd()
+	@Subscribe
+	public void onClanChannelChanged(ClanChannelChanged event)
 	{
-		if (motdShown
-			|| !config.showMotdOnLogin()
-			|| !session.isLoggedIn()
-			|| client.getGameState() != GameState.LOGGED_IN)
+		if (!event.isGuest())
 		{
-			return;
+			refreshAccess();
 		}
-		motdShown = true; // guard against duplicate fetches while the request is in flight
-		apiClient.getActiveBroadcasts(new ApiCallback<List<Broadcast>>()
+	}
+
+	private void refreshAccess()
+	{
+		clientThread.invoke(() ->
+		{
+			final ClanAccess access = clanMembershipService.checkAccess();
+			SwingUtilities.invokeLater(() -> panel.render(access));
+		});
+	}
+
+	private void refreshAll()
+	{
+		refreshAccess();
+		refreshFeed();
+	}
+
+	private void refreshFeed()
+	{
+		panel.setFeedLoading();
+		pluginFeedClient.fetch(new PluginFeedClient.FeedCallback()
 		{
 			@Override
-			public void onSuccess(List<Broadcast> broadcasts)
+			public void onSuccess(PluginFeed feed)
 			{
-				if (broadcasts == null || broadcasts.isEmpty())
-				{
-					return;
-				}
-				clientThread.invoke(() ->
-				{
-					for (Broadcast broadcast : broadcasts)
-					{
-						if (broadcast != null && broadcast.isActive()
-							&& broadcast.getMessage() != null && !broadcast.getMessage().trim().isEmpty())
-						{
-							postMotd(broadcast.getMessage().trim());
-						}
-					}
-				});
+				SwingUtilities.invokeLater(() -> panel.renderFeed(feed, null));
 			}
 
 			@Override
-			public void onFailure(String error, int httpCode)
+			public void onFailure(String error)
 			{
-				log.debug("Could not fetch MOTD: {} (HTTP {})", error, httpCode);
-				// Allow a retry on the next login/session change.
-				motdShown = false;
+				SwingUtilities.invokeLater(() -> panel.renderFeed(null, error));
 			}
 		});
 	}
 
-	private void postMotd(String message)
+	private void clearLegacyConfig()
 	{
-		// Broadcasts may contain multiple lines; the chat box is single-line, so queue one per line.
-		for (String line : message.split("\\r?\\n"))
+		for (String key : LEGACY_CONFIG_KEYS)
 		{
-			if (line.trim().isEmpty())
-			{
-				continue;
-			}
-			final String formatted = new ChatMessageBuilder()
-				.append(ChatColorType.HIGHLIGHT)
-				.append("[The Lobster Pot] ")
-				.append(ChatColorType.NORMAL)
-				.append(line.trim())
-				.build();
-
-			chatMessageManager.queue(QueuedMessage.builder()
-				.type(ChatMessageType.CONSOLE)
-				.runeLiteFormattedMessage(formatted)
-				.build());
+			configManager.unsetConfiguration(LobsterPotConfig.GROUP, key);
 		}
 	}
 }
