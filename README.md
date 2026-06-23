@@ -40,7 +40,7 @@ Requires a JDK 11 or newer. From the project root:
 ## Plugin Hub submission
 
 The plugin is BSD 2-Clause licensed, targets Java 11, uses `build=standard`, and has no bundled
-third-party dependencies. It does make an external read-only request when a feed URL is configured.
+third-party dependencies. It does make an external read-only request to the built-in GitHub feed URL.
 
 ## License
 

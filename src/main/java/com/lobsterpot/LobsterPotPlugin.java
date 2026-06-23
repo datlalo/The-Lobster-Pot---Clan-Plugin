@@ -1,6 +1,5 @@
 package com.lobsterpot;
 
-import com.google.inject.Provides;
 import com.lobsterpot.ClanMembershipService.ClanAccess;
 import com.lobsterpot.feed.PluginFeed;
 import com.lobsterpot.feed.PluginFeedClient;
@@ -27,6 +26,7 @@ import net.runelite.client.util.ImageUtil;
 )
 public class LobsterPotPlugin extends Plugin
 {
+	private static final String CONFIG_GROUP = "lobsterpot";
 	private static final String[] LEGACY_CONFIG_KEYS = {
 		"apiBaseUrl",
 		"enableRankRequests",
@@ -80,12 +80,6 @@ public class LobsterPotPlugin extends Plugin
 	{
 		clientToolbar.removeNavigation(navButton);
 		navButton = null;
-	}
-
-	@Provides
-	LobsterPotConfig provideConfig(ConfigManager configManager)
-	{
-		return configManager.getConfig(LobsterPotConfig.class);
 	}
 
 	@Subscribe
@@ -146,7 +140,7 @@ public class LobsterPotPlugin extends Plugin
 	{
 		for (String key : LEGACY_CONFIG_KEYS)
 		{
-			configManager.unsetConfiguration(LobsterPotConfig.GROUP, key);
+			configManager.unsetConfiguration(CONFIG_GROUP, key);
 		}
 	}
 }

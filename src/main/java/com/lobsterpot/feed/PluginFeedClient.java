@@ -1,13 +1,11 @@
 package com.lobsterpot.feed;
 
 import com.google.gson.Gson;
-import com.lobsterpot.LobsterPotConfig;
 import java.io.IOException;
 import javax.inject.Inject;
 import javax.inject.Singleton;
 import okhttp3.Call;
 import okhttp3.Callback;
-import okhttp3.HttpUrl;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
 import okhttp3.Response;
@@ -16,35 +14,22 @@ import okhttp3.ResponseBody;
 @Singleton
 public class PluginFeedClient
 {
+	private static final String PLUGIN_FEED_URL = "https://raw.githubusercontent.com/datlalo/lobsterpot-plugin-feed/refs/heads/main/plugin-feed.json";
+
 	private final OkHttpClient httpClient;
 	private final Gson gson;
-	private final LobsterPotConfig config;
 
 	@Inject
-	public PluginFeedClient(OkHttpClient httpClient, Gson gson, LobsterPotConfig config)
+	public PluginFeedClient(OkHttpClient httpClient, Gson gson)
 	{
 		this.httpClient = httpClient;
 		this.gson = gson;
-		this.config = config;
 	}
 
 	public void fetch(FeedCallback callback)
 	{
-		String configured = config.pluginFeedUrl();
-		if (configured == null || configured.trim().isEmpty())
-		{
-			configured = LobsterPotConfig.DEFAULT_PLUGIN_FEED_URL;
-		}
-
-		final HttpUrl url = HttpUrl.parse(configured.trim());
-		if (url == null)
-		{
-			callback.onFailure("Plugin feed URL is invalid.");
-			return;
-		}
-
 		final Request request = new Request.Builder()
-			.url(url)
+			.url(PLUGIN_FEED_URL)
 			.header("Accept", "application/json")
 			.get()
 			.build();
