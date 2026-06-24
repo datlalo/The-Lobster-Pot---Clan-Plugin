@@ -15,6 +15,9 @@ repositories {
 
 def runeLiteVersion = 'latest.release'
 def pluginMainClass = 'com.lobsterpot.LobsterPotPluginTest'
+def localJvmArgs = System.getProperty('os.name').toLowerCase(Locale.ROOT).contains('windows')
+	? ['-Djavax.net.ssl.trustStoreType=Windows-ROOT']
+	: []
 
 dependencies {
 	compileOnly group: 'net.runelite', name:'client', version: runeLiteVersion
@@ -39,7 +42,19 @@ tasks.register('run', JavaExec) {
 	mainClass = pluginMainClass
 
 	jvmArgs "-ea"
+	jvmArgs localJvmArgs
 	args "--developer-mode", "--debug"
+}
+
+tasks.register('previewPanel', JavaExec) {
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass = 'com.lobsterpot.LobsterPotPanelPreview'
+
+	jvmArgs localJvmArgs
+	args = [
+		(project.findProperty('previewRsn') ?: 'Fikos').toString(),
+		(project.findProperty('previewRank') ?: 'Ruby').toString()
+	]
 }
 
 tasks.register('shadowJar', Jar) {

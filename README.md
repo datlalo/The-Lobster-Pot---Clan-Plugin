@@ -37,6 +37,12 @@ Requires a JDK 11 or newer. From the project root:
 
 `./gradlew run` launches a developer RuneLite client with the plugin loaded.
 
+To preview the panel without logging into RuneLite:
+
+```sh
+./gradlew previewPanel -PpreviewRsn=Fikos -PpreviewRank=Ruby
+```
+
 ## Plugin Hub submission
 
 The plugin is BSD 2-Clause licensed, targets Java 11, uses `build=standard`, and has no bundled
