@@ -8,6 +8,7 @@ import com.lobsterpot.feed.FeedMember;
 import com.lobsterpot.feed.FeedNextRank;
 import com.lobsterpot.feed.FeedPendingClaim;
 import com.lobsterpot.feed.PluginFeed;
+import com.lobsterpot.requirements.RankRequirementEvaluation;
 import java.awt.BorderLayout;
 import java.awt.Color;
 import java.awt.Component;
@@ -85,6 +86,7 @@ public class LobsterPotPanel extends PluginPanel
 	private boolean detailsExpanded;
 	private PluginFeed currentFeed;
 	private String currentFeedError;
+	private RankRequirementEvaluation currentRequirementEvaluation;
 
 	@Inject
 	public LobsterPotPanel()
@@ -145,14 +147,20 @@ public class LobsterPotPanel extends PluginPanel
 	{
 		if (access == null)
 		{
+			currentRequirementEvaluation = null;
 			setChecking();
 			return;
 		}
 
+		final String previousPlayerName = currentPlayerName;
 		currentPlayerName = access.getPlayerName();
 		currentRankName = access.getRankName();
 		currentAccessMessage = access.getMessage();
 		currentAccessAllowed = access.isAllowed();
+		if (!currentAccessAllowed || !rsnKey(currentPlayerName).equals(rsnKey(previousPlayerName)))
+		{
+			currentRequirementEvaluation = null;
+		}
 		updateHeader();
 		showProfile();
 
@@ -164,6 +172,7 @@ public class LobsterPotPanel extends PluginPanel
 	{
 		currentFeed = null;
 		currentFeedError = null;
+		currentRequirementEvaluation = null;
 		setNextRankMessage("Loading clan profile...");
 		setDetailsMessage("Loading clan details...");
 		setBroadcastsMessage("Loading broadcasts...");
@@ -174,6 +183,7 @@ public class LobsterPotPanel extends PluginPanel
 	{
 		currentFeed = null;
 		currentFeedError = message;
+		currentRequirementEvaluation = null;
 		setNextRankMessage(message);
 		setDetailsMessage(message);
 		setBroadcastsMessage(message);
@@ -187,6 +197,7 @@ public class LobsterPotPanel extends PluginPanel
 
 		if (error != null)
 		{
+			currentRequirementEvaluation = null;
 			setNextRankMessage(error);
 			setDetailsMessage(error);
 			setBroadcastsMessage(error);
@@ -195,6 +206,7 @@ public class LobsterPotPanel extends PluginPanel
 		}
 		if (feed == null)
 		{
+			currentRequirementEvaluation = null;
 			setNextRankMessage("No feed loaded.");
 			setDetailsMessage("No feed loaded.");
 			setBroadcastsMessage("No feed loaded.");
@@ -207,8 +219,15 @@ public class LobsterPotPanel extends PluginPanel
 		showEvents(feed.getEvents());
 	}
 
+	public void renderRequirementEvaluation(RankRequirementEvaluation evaluation)
+	{
+		currentRequirementEvaluation = evaluation;
+		showProfile();
+	}
+
 	private void setChecking()
 	{
+		currentRequirementEvaluation = null;
 		currentPlayerName = null;
 		currentRankName = null;
 		currentAccessMessage = "Checking clan membership...";
@@ -433,7 +452,8 @@ public class LobsterPotPanel extends PluginPanel
 
 	private void addRequirementLine(JPanel row, FeedNextRank nextRank)
 	{
-		if (!hasText(nextRank.getRequirements()))
+		final String requirementText = specialRequirementText(nextRank);
+		if (!hasText(requirementText))
 		{
 			return;
 		}
@@ -441,18 +461,28 @@ public class LobsterPotPanel extends PluginPanel
 		row.add(verticalGap(6));
 		if (Boolean.TRUE.equals(nextRank.getCanClaim()))
 		{
-			row.add(statusLine(CHECK + " " + nextRank.getRequirements().trim() + " complete", ALLOWED_COLOR));
+			row.add(statusLine(CHECK + " " + requirementText + " complete", ALLOWED_COLOR));
 			return;
 		}
-		row.add(grayLine("Special requirement: " + nextRank.getRequirements().trim()));
+		if (currentRequirementEvaluation != null
+			&& currentRequirementEvaluation.getStatus() == RankRequirementEvaluation.Status.MET)
+		{
+			row.add(statusLine(CHECK + " " + currentRequirementEvaluation.getMessage(), ALLOWED_COLOR));
+			return;
+		}
+		row.add(grayLine("Special requirement: " + requirementText));
 	}
 
 	private void addBlockers(JPanel row, FeedNextRank nextRank)
 	{
 		final int missingPoints = positive(nextRank.getMissingPoints());
 		final int missingMonths = positive(nextRank.getMissingMonths());
-		final boolean hasRequirement = hasText(nextRank.getRequirements());
+		final String requirementText = specialRequirementText(nextRank);
+		final boolean hasRequirement = hasText(requirementText);
 		final boolean canClaim = Boolean.TRUE.equals(nextRank.getCanClaim());
+		final boolean requirementMet = !hasRequirement || canClaim
+			|| (currentRequirementEvaluation != null
+			&& currentRequirementEvaluation.getStatus() == RankRequirementEvaluation.Status.MET);
 
 		row.add(verticalGap(6));
 		row.add(smallHeading("Blocking requirements"));
@@ -474,10 +504,57 @@ public class LobsterPotPanel extends PluginPanel
 			row.add(statusLine(CHECK + " Time requirement met", ALLOWED_COLOR));
 		}
 
-		if (missingPoints == 0 && missingMonths == 0 && (!hasRequirement || canClaim))
+		addSpecialRequirementBlocker(row, requirementText, canClaim);
+
+		if (missingPoints == 0 && missingMonths == 0 && requirementMet)
 		{
 			row.add(statusLine(CHECK + " All requirements met", ALLOWED_COLOR));
 		}
+	}
+
+	private void addSpecialRequirementBlocker(JPanel row, String requirementText, boolean canClaim)
+	{
+		if (!hasText(requirementText))
+		{
+			return;
+		}
+		if (canClaim)
+		{
+			row.add(statusLine(CHECK + " Special requirement met", ALLOWED_COLOR));
+			return;
+		}
+		if (currentRequirementEvaluation == null)
+		{
+			row.add(statusLine("? " + requirementText + " not verified", KEY_COLOR));
+			return;
+		}
+
+		final RankRequirementEvaluation.Status status = currentRequirementEvaluation.getStatus();
+		if (status == RankRequirementEvaluation.Status.MET)
+		{
+			row.add(statusLine(CHECK + " " + currentRequirementEvaluation.getMessage(), ALLOWED_COLOR));
+		}
+		else if (status == RankRequirementEvaluation.Status.MISSING)
+		{
+			row.add(statusLine(CROSS + " " + currentRequirementEvaluation.getMessage(), DENIED_COLOR));
+		}
+		else
+		{
+			row.add(statusLine("? " + currentRequirementEvaluation.getMessage(), KEY_COLOR));
+		}
+	}
+
+	private String specialRequirementText(FeedNextRank nextRank)
+	{
+		if (nextRank != null && hasText(nextRank.getRequirements()))
+		{
+			return nextRank.getRequirements().trim();
+		}
+		if (currentRequirementEvaluation != null && hasText(currentRequirementEvaluation.getRequirementText()))
+		{
+			return currentRequirementEvaluation.getRequirementText().trim();
+		}
+		return null;
 	}
 
 	private void addPendingClaims(JPanel row, FeedMember member)
