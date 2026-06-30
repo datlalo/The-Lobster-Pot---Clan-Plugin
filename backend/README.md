@@ -1,34 +1,32 @@
 # LobsterPot Positions Worker
 
-This Worker stores recent clan member map positions for the RuneLite plugin.
-Entries expire after 120 seconds.
+This Worker powers the clan world map for the RuneLite plugin.
 
-Posts and reads are checked against the live LobsterPot plugin feed member list.
-This prevents non-member names from posting or reading positions through the normal
-endpoint, but it is not cryptographic proof of RuneScape account ownership.
+Clients connect to `GET /positions?viewer=RSN` using a WebSocket. A single Durable Object keeps
+current member positions in memory and broadcasts compact snapshots to connected clan members.
+Positions are not written to KV or permanent storage, and stale positions expire after about
+20 seconds if a client stops sending updates.
+
+Posts and reads are checked against the live LobsterPot plugin feed member list. This prevents
+non-member names from posting or reading positions through the normal endpoint, but it is not
+cryptographic proof of RuneScape account ownership.
 
 ## Deploy
 
-1. Log in to Cloudflare:
+1. Use a Cloudflare account with Workers Paid enabled. Durable Objects are not the old KV backend.
+2. Log in to Cloudflare:
 
 ```bash
 npx wrangler login
 ```
 
-2. Create a Cloudflare KV namespace:
-
-```bash
-npx wrangler kv namespace create POSITIONS
-```
-
-3. Copy the returned namespace id into `wrangler.toml`.
-4. Deploy:
+3. Deploy:
 
 ```bash
 npx wrangler deploy
 ```
 
-5. Replace `BACKEND_URL` in `ClanPositionService` with the deployed Worker URL from Wrangler.
+Wrangler will create/apply the Durable Object migration from `wrangler.toml`.
 
 For local testing, run:
 
@@ -36,4 +34,5 @@ For local testing, run:
 npx wrangler dev
 ```
 
-For local plugin testing, temporarily point `BACKEND_URL` at `http://localhost:8787`.
+For local plugin testing, temporarily point `BACKEND_URL` in `ClanPositionService` at
+`http://localhost:8787`.

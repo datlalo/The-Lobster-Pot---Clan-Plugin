@@ -1,20 +1,251 @@
-// Cloudflare Worker — lobsterpot-positions
-//
-// KV namespace binding: POSITIONS
-//
-// POST /position  { rsn, x, y, plane, world }  → upserts with 120s TTL
-// GET  /positions?viewer=RSN                    → returns live member entries as JSON array
+import { DurableObject } from 'cloudflare:workers';
 
-const TTL_SECONDS = 120;
+// Cloudflare Worker - lobsterpot-positions
+//
+// GET /positions?viewer=RSN with WebSocket upgrade
+// Stores live positions in a single Durable Object instance. Positions are kept
+// in memory only and expire quickly if the client stops sending updates.
+
 const MAX_COORDINATE = 64000;
 const MAX_ACTIVITY_LENGTH = 80;
 const MEMBER_FEED_URL = 'https://raw.githubusercontent.com/datlalo/lobsterpot-plugin-feed/refs/heads/main/plugin-feed.json';
 const MEMBER_CACHE_MS = 60000;
+const POSITION_TTL_MS = 20000;
+const MIN_POSITION_UPDATE_MS = 4000;
+const BROADCAST_INTERVAL_MS = 5000;
 
 let memberCache = {
 	expiresAt: 0,
 	keys: new Set(),
 };
+
+export class ClanPositionRoom extends DurableObject {
+	constructor(ctx, env) {
+		super(ctx, env);
+		this.sessions = new Map();
+		this.positions = new Map();
+		this.lastBroadcastAt = 0;
+		this.broadcastTimer = null;
+
+		for (const socket of this.ctx.getWebSockets()) {
+			const session = socket.deserializeAttachment();
+			if (!session || !session.key) {
+				continue;
+			}
+
+			this.sessions.set(socket, session);
+			if (session.position && isFreshPosition(session.position, Date.now())) {
+				this.positions.set(session.key, session.position);
+			}
+		}
+	}
+
+	async fetch(request) {
+		const url = new URL(request.url);
+		if (request.method !== 'GET' || url.pathname !== '/positions') {
+			return new Response('Not Found', { status: 404 });
+		}
+
+		if (request.headers.get('Upgrade') !== 'websocket') {
+			return new Response('Expected WebSocket upgrade', { status: 426 });
+		}
+
+		const viewer = (url.searchParams.get('viewer') || '').trim();
+		const key = memberKey(viewer);
+		if (!key) {
+			return new Response('Missing viewer', { status: 400 });
+		}
+
+		let memberKeys;
+		try {
+			memberKeys = await clanMemberKeys();
+		} catch {
+			return new Response('Member feed unavailable', { status: 503 });
+		}
+		if (!memberKeys.has(key)) {
+			return new Response('Forbidden', { status: 403 });
+		}
+
+		const pair = new WebSocketPair();
+		const [client, server] = Object.values(pair);
+		const session = {
+			connectionId: crypto.randomUUID(),
+			key,
+			rsn: viewer,
+			lastUpdateAt: 0,
+			position: null,
+		};
+
+		this.ctx.acceptWebSocket(server);
+		this.sessions.set(server, session);
+		server.serializeAttachment(session);
+		this.sendPositions(server, memberKeys);
+
+		return new Response(null, { status: 101, webSocket: client });
+	}
+
+	async webSocketMessage(socket, message) {
+		const session = this.sessions.get(socket);
+		if (!session || typeof message !== 'string') {
+			return;
+		}
+
+		let memberKeys;
+		try {
+			memberKeys = await clanMemberKeys();
+		} catch {
+			socket.close(1011, 'Member feed unavailable');
+			this.removeSession(socket);
+			return;
+		}
+		if (!memberKeys.has(session.key)) {
+			socket.close(1008, 'Forbidden');
+			this.removeSession(socket);
+			return;
+		}
+
+		let data;
+		try {
+			data = JSON.parse(message);
+		} catch {
+			socket.close(1003, 'Bad JSON');
+			this.removeSession(socket);
+			return;
+		}
+
+		if (data && data.type === 'clear') {
+			this.removeSessionPosition(socket);
+			this.queueBroadcast(memberKeys);
+			return;
+		}
+
+		const now = Date.now();
+		if (now - session.lastUpdateAt < MIN_POSITION_UPDATE_MS) {
+			return;
+		}
+		if (!isValidPosition(data) || memberKey(data.rsn) !== session.key) {
+			socket.close(1008, 'Invalid position');
+			this.removeSession(socket);
+			return;
+		}
+
+		const position = {
+			connectionId: session.connectionId,
+			key: session.key,
+			rsn: String(data.rsn).trim(),
+			x: Math.trunc(data.x),
+			y: Math.trunc(data.y),
+			plane: Math.trunc(data.plane),
+			world: Math.trunc(data.world),
+			activity: cleanActivity(data.activity),
+			updatedAt: now,
+		};
+
+		session.lastUpdateAt = now;
+		session.position = position;
+		socket.serializeAttachment(session);
+		this.positions.set(session.key, position);
+		this.queueBroadcast(memberKeys);
+	}
+
+	async webSocketClose(socket) {
+		this.removeSession(socket);
+		this.queueBroadcast();
+	}
+
+	async webSocketError(socket) {
+		this.removeSession(socket);
+		this.queueBroadcast();
+	}
+
+	removeSession(socket) {
+		this.removeSessionPosition(socket);
+		this.sessions.delete(socket);
+	}
+
+	removeSessionPosition(socket) {
+		const session = this.sessions.get(socket);
+		if (!session) {
+			return;
+		}
+
+		const current = this.positions.get(session.key);
+		if (current && current.connectionId === session.connectionId) {
+			this.positions.delete(session.key);
+		}
+		session.position = null;
+		try {
+			socket.serializeAttachment(session);
+		} catch {
+		}
+	}
+
+	queueBroadcast(memberKeys) {
+		const now = Date.now();
+		const waitMs = Math.max(0, BROADCAST_INTERVAL_MS - (now - this.lastBroadcastAt));
+		if (waitMs === 0) {
+			this.broadcastPositions(memberKeys).catch(() => {});
+			return;
+		}
+
+		if (this.broadcastTimer) {
+			return;
+		}
+
+		this.broadcastTimer = setTimeout(() => {
+			this.broadcastTimer = null;
+			this.broadcastPositions().catch(() => {});
+		}, waitMs);
+	}
+
+	async broadcastPositions(memberKeys) {
+		this.lastBroadcastAt = Date.now();
+		let keys = memberKeys;
+		if (!keys) {
+			try {
+				keys = await clanMemberKeys();
+			} catch {
+				return;
+			}
+		}
+
+		this.removeStalePositions();
+		for (const [socket, session] of this.sessions) {
+			if (!keys.has(session.key)) {
+				socket.close(1008, 'Forbidden');
+				this.removeSession(socket);
+				continue;
+			}
+			this.sendPositions(socket, keys);
+		}
+	}
+
+	sendPositions(socket, memberKeys) {
+		const session = this.sessions.get(socket);
+		if (!session) {
+			return;
+		}
+
+		this.removeStalePositions();
+		const visiblePositions = [];
+		for (const position of this.positions.values()) {
+			if (position.key === session.key || !memberKeys.has(position.key)) {
+				continue;
+			}
+			visiblePositions.push(publicPosition(position));
+		}
+		socket.send(JSON.stringify(visiblePositions));
+	}
+
+	removeStalePositions() {
+		const now = Date.now();
+		for (const [key, position] of this.positions) {
+			if (!isFreshPosition(position, now)) {
+				this.positions.delete(key);
+			}
+		}
+	}
+}
 
 export default {
 	async fetch(request, env) {
@@ -24,68 +255,13 @@ export default {
 			return corsResponse(new Response(null, { status: 204 }));
 		}
 
-		if (request.method === 'POST' && url.pathname === '/position') {
-			let body;
-			try {
-				body = await request.json();
-			} catch {
-				return corsResponse(new Response('Bad JSON', { status: 400 }));
-			}
-
-			if (!isValidPosition(body)) {
-				return corsResponse(new Response('Invalid fields', { status: 400 }));
-			}
-
-			const position = {
-				rsn: String(body.rsn).trim(),
-				x: Math.trunc(body.x),
-				y: Math.trunc(body.y),
-				plane: Math.trunc(body.plane),
-				world: Math.trunc(body.world),
-				activity: cleanActivity(body.activity),
-			};
-			const key = memberKey(position.rsn);
-			let memberKeys;
-			try {
-				memberKeys = await clanMemberKeys();
-			} catch {
-				return corsResponse(new Response('Member feed unavailable', { status: 503 }));
-			}
-			if (!memberKeys.has(key)) {
-				return corsResponse(new Response('Forbidden', { status: 403 }));
-			}
-
-			await env.POSITIONS.put(key, JSON.stringify(position), { expirationTtl: TTL_SECONDS });
-			return corsResponse(new Response('OK', { status: 200 }));
+		if (url.pathname === '/positions') {
+			const id = env.POSITION_ROOM.idFromName('lobsterpot');
+			return env.POSITION_ROOM.get(id).fetch(request);
 		}
 
-		if (request.method === 'GET' && url.pathname === '/positions') {
-			let memberKeys;
-			try {
-				memberKeys = await clanMemberKeys();
-			} catch {
-				return corsResponse(new Response('Member feed unavailable', { status: 503 }));
-			}
-			const viewerKey = memberKey(url.searchParams.get('viewer') || '');
-			if (!memberKeys.has(viewerKey)) {
-				return corsResponse(new Response('Forbidden', { status: 403 }));
-			}
-
-			const list = await env.POSITIONS.list();
-			const entries = await Promise.all(
-				list.keys.map(async ({ name }) => {
-					const value = await env.POSITIONS.get(name);
-					return value ? JSON.parse(value) : null;
-				})
-			);
-			const positions = entries.filter((position) => {
-				const positionKey = position ? memberKey(position.rsn) : '';
-				return position && isValidPosition(position) && positionKey !== viewerKey && memberKeys.has(positionKey);
-			});
-			return corsResponse(new Response(JSON.stringify(positions), {
-				status: 200,
-				headers: { 'Content-Type': 'application/json' },
-			}));
+		if (url.pathname === '/health') {
+			return corsResponse(new Response('OK', { status: 200 }));
 		}
 
 		return corsResponse(new Response('Not Found', { status: 404 }));
@@ -144,6 +320,21 @@ function isValidPosition(body) {
 		&& body.world > 0;
 }
 
+function publicPosition(position) {
+	return {
+		rsn: position.rsn,
+		x: position.x,
+		y: position.y,
+		plane: position.plane,
+		world: position.world,
+		activity: position.activity,
+	};
+}
+
+function isFreshPosition(position, now) {
+	return position && typeof position.updatedAt === 'number' && now - position.updatedAt <= POSITION_TTL_MS;
+}
+
 function cleanActivity(activity) {
 	if (typeof activity !== 'string') {
 		return '';
@@ -152,13 +343,13 @@ function cleanActivity(activity) {
 }
 
 function memberKey(rsn) {
-	return rsn.replace(/[\s_-]+/g, '').toLowerCase();
+	return String(rsn || '').replace(/[\s_-\u00a0]+/g, '').toLowerCase();
 }
 
 function corsResponse(response) {
 	const headers = new Headers(response.headers);
 	headers.set('Access-Control-Allow-Origin', '*');
-	headers.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+	headers.set('Access-Control-Allow-Methods', 'GET, OPTIONS');
 	headers.set('Access-Control-Allow-Headers', 'Content-Type');
 	return new Response(response.body, { status: response.status, headers });
 }

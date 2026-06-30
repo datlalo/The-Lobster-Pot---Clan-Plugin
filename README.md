@@ -14,7 +14,7 @@ external request, RuneLite should be expected to show its third-party IP warning
 
 When the clan world map is enabled, the plugin also sends the logged-in character name, world,
 world-map tile position, plane, and detected activity to the LobsterPot positions backend. The
-backend stores recent positions briefly so other LobsterPot members can see each other on the world
+backend keeps live positions in memory so other LobsterPot members can see each other on the world
 map. Posting can be disabled from the plugin config with `Share world map location`.
 
 ## Current behavior

@@ -1,14 +1,12 @@
 package com.lobsterpot.worldmap;
 
 import com.google.gson.Gson;
+import com.google.gson.JsonSyntaxException;
 import com.lobsterpot.ClanMembershipService.ClanAccess;
 import java.awt.Rectangle;
 import java.awt.image.BufferedImage;
-import java.io.IOException;
 import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
-import java.net.URLEncoder;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.EnumSet;
@@ -49,14 +47,12 @@ import net.runelite.client.ui.overlay.worldmap.WorldMapPointManager;
 import net.runelite.client.util.Text;
 import net.runelite.client.util.WorldUtil;
 import net.runelite.http.api.worlds.WorldResult;
-import okhttp3.Call;
-import okhttp3.Callback;
-import okhttp3.MediaType;
+import okhttp3.HttpUrl;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
-import okhttp3.RequestBody;
 import okhttp3.Response;
-import okhttp3.ResponseBody;
+import okhttp3.WebSocket;
+import okhttp3.WebSocketListener;
 
 @Singleton
 public class ClanPositionService
@@ -68,6 +64,7 @@ public class ClanPositionService
 	private static final int MAX_POSITION_DISTANCE = 64_000;
 	private static final int MAX_ACTIVITY_LENGTH = 80;
 	private static final int MAP_MARKER_HOVER_PADDING = 6;
+	private static final long SOCKET_RECONNECT_DELAY_MS = 10_000L;
 	private static final Map<Integer, String> ACTIVITY_BY_ANIMATION = buildActivityByAnimation();
 
 	@Inject
@@ -92,6 +89,11 @@ public class ClanPositionService
 	private WorldService worldService;
 
 	private volatile boolean active = false;
+	private volatile WebSocket positionSocket;
+	private volatile boolean socketConnecting = false;
+	private volatile String socketPlayerKey = "";
+	private long lastSocketAttemptAt = 0L;
+	private volatile boolean sharedPositionOnSocket = false;
 	private int tickCounter = 0;
 	private int displaySwitcherAttempts = 0;
 	private World quickHopTargetWorld;
@@ -101,11 +103,13 @@ public class ClanPositionService
 	{
 		active = true;
 		tickCounter = 0;
+		sharedPositionOnSocket = false;
 	}
 
 	public void stop()
 	{
 		active = false;
+		disconnectPositionSocket();
 		resetQuickHopper();
 		clientThread.invokeLater(this::clearPoints);
 	}
@@ -127,6 +131,7 @@ public class ClanPositionService
 
 		if (access == null || !access.isAllowed())
 		{
+			disconnectPositionSocket();
 			clearPoints();
 			return;
 		}
@@ -134,24 +139,29 @@ public class ClanPositionService
 		final Player localPlayer = client.getLocalPlayer();
 		if (localPlayer == null || localPlayer.getName() == null)
 		{
+			disconnectPositionSocket();
+			clearPoints();
 			return;
 		}
 
 		final String rsn = localPlayer.getName();
+		ensurePositionSocket(rsn);
+
 		final WorldPoint wp = localPlayer.getWorldLocation();
 		if (wp == null)
 		{
 			return;
 		}
 
-		final int world = client.getWorld();
-		if (shareLocation)
+		if (!shareLocation)
 		{
-			final String activity = currentPlayerActivity(localPlayer, world);
-			postPosition(rsn, wp, world, activity);
+			clearSharedPosition();
+			return;
 		}
 
-		fetchPositions(rsn);
+		final int world = client.getWorld();
+		final String activity = currentPlayerActivity(localPlayer, world);
+		sendPosition(rsn, wp, world, activity);
 	}
 
 	public void addHopMenuEntry(MenuEntryAdded event)
@@ -258,68 +268,166 @@ public class ClanPositionService
 		trackedPoints.clear();
 	}
 
-	private void postPosition(String rsn, WorldPoint wp, int world, String activity)
+	private void ensurePositionSocket(String rsn)
 	{
-		final String json = gson.toJson(new ClanPosition(rsn, wp.getX(), wp.getY(), wp.getPlane(), world, activity));
+		final String key = playerKey(rsn);
+		if (key.isEmpty())
+		{
+			disconnectPositionSocket();
+			return;
+		}
+
+		final WebSocket socket = positionSocket;
+		if (socket != null && key.equals(socketPlayerKey))
+		{
+			return;
+		}
+
+		if (socket != null)
+		{
+			disconnectPositionSocket();
+		}
+
+		if (socketConnecting && key.equals(socketPlayerKey))
+		{
+			return;
+		}
+
+		final long now = System.currentTimeMillis();
+		if (now - lastSocketAttemptAt < SOCKET_RECONNECT_DELAY_MS)
+		{
+			return;
+		}
+
+		final HttpUrl backendUrl = HttpUrl.parse(BACKEND_URL + "/positions");
+		if (backendUrl == null)
+		{
+			return;
+		}
+
 		final Request request = new Request.Builder()
-			.url(BACKEND_URL + "/position")
-			.post(RequestBody.create(MediaType.parse("application/json"), json))
+			.url(backendUrl.newBuilder().addQueryParameter("viewer", rsn).build())
 			.build();
 
-		httpClient.newCall(request).enqueue(new Callback()
+		socketConnecting = true;
+		socketPlayerKey = key;
+		lastSocketAttemptAt = now;
+		positionSocket = httpClient.newWebSocket(request, new WebSocketListener()
 		{
 			@Override
-			public void onFailure(Call call, IOException e)
+			public void onOpen(WebSocket webSocket, Response response)
 			{
+				socketConnecting = false;
 			}
 
 			@Override
-			public void onResponse(Call call, Response response) throws IOException
+			public void onMessage(WebSocket webSocket, String text)
 			{
-				response.close();
+				handlePositionSnapshot(rsn, text);
+			}
+
+			@Override
+			public void onClosed(WebSocket webSocket, int code, String reason)
+			{
+				handleSocketClosed(webSocket);
+			}
+
+			@Override
+			public void onFailure(WebSocket webSocket, Throwable t, Response response)
+			{
+				handleSocketClosed(webSocket);
 			}
 		});
 	}
 
-	private void fetchPositions(String localRsn)
+	private void sendPosition(String rsn, WorldPoint wp, int world, String activity)
 	{
-		final String encodedRsn = URLEncoder.encode(localRsn, StandardCharsets.UTF_8);
-		final Request request = new Request.Builder()
-			.url(BACKEND_URL + "/positions?viewer=" + encodedRsn)
-			.get()
-			.build();
-
-		httpClient.newCall(request).enqueue(new Callback()
+		final WebSocket socket = positionSocket;
+		if (socket == null || !playerKey(rsn).equals(socketPlayerKey))
 		{
-			@Override
-			public void onFailure(Call call, IOException e)
+			ensurePositionSocket(rsn);
+			return;
+		}
+
+		final String json = gson.toJson(new ClanPosition(rsn, wp.getX(), wp.getY(), wp.getPlane(), world, activity));
+		if (socket.send(json))
+		{
+			sharedPositionOnSocket = true;
+			return;
+		}
+
+		handleSocketClosed(socket);
+	}
+
+	private void clearSharedPosition()
+	{
+		if (!sharedPositionOnSocket)
+		{
+			return;
+		}
+
+		final WebSocket socket = positionSocket;
+		if (socket != null)
+		{
+			socket.send("{\"type\":\"clear\"}");
+		}
+		sharedPositionOnSocket = false;
+	}
+
+	private void disconnectPositionSocket()
+	{
+		final WebSocket socket = positionSocket;
+		positionSocket = null;
+		socketConnecting = false;
+		socketPlayerKey = "";
+		sharedPositionOnSocket = false;
+		if (socket != null)
+		{
+			socket.close(1000, "Plugin stopped");
+		}
+	}
+
+	private void handleSocketClosed(WebSocket webSocket)
+	{
+		if (webSocket != positionSocket)
+		{
+			return;
+		}
+
+		positionSocket = null;
+		socketConnecting = false;
+		sharedPositionOnSocket = false;
+		clientThread.invokeLater(() ->
+		{
+			if (active)
 			{
+				clearPoints();
 			}
+		});
+	}
 
-			@Override
-			public void onResponse(Call call, Response response) throws IOException
+	private void handlePositionSnapshot(String localRsn, String message)
+	{
+		final ClanPosition[] positions;
+		try
+		{
+			positions = gson.fromJson(message, ClanPosition[].class);
+		}
+		catch (JsonSyntaxException ex)
+		{
+			return;
+		}
+
+		if (positions == null)
+		{
+			return;
+		}
+
+		clientThread.invokeLater(() ->
+		{
+			if (active)
 			{
-				try (ResponseBody body = response.body())
-				{
-					if (!active || !response.isSuccessful() || body == null)
-					{
-						return;
-					}
-
-					final ClanPosition[] positions = gson.fromJson(body.charStream(), ClanPosition[].class);
-					if (positions == null)
-					{
-						return;
-					}
-
-					clientThread.invokeLater(() ->
-					{
-						if (active)
-						{
-							updateMapPoints(localRsn, positions);
-						}
-					});
-				}
+				updateMapPoints(localRsn, positions);
 			}
 		});
 	}
