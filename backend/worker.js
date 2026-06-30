@@ -79,7 +79,8 @@ export default {
 				})
 			);
 			const positions = entries.filter((position) => {
-				return position && isValidPosition(position) && memberKeys.has(memberKey(position.rsn));
+				const positionKey = position ? memberKey(position.rsn) : '';
+				return position && isValidPosition(position) && positionKey !== viewerKey && memberKeys.has(positionKey);
 			});
 			return corsResponse(new Response(JSON.stringify(positions), {
 				status: 200,

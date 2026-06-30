@@ -329,6 +329,7 @@ public class ClanPositionService
 		final ClanChannel clanChannel = client.getClanChannel();
 		final ClanSettings clanSettings = client.getClanSettings();
 		final Set<String> clanMemberKeys = clanMemberKeys(clanChannel, clanSettings);
+		final String localKey = playerKey(localRsn);
 		final Set<String> activeKeys = new HashSet<>();
 		if (clanMemberKeys.isEmpty())
 		{
@@ -344,7 +345,7 @@ public class ClanPositionService
 			}
 
 			final String key = playerKey(pos.rsn);
-			if (key.isEmpty() || !clanMemberKeys.contains(key) || !isValidPosition(pos))
+			if (key.isEmpty() || key.equals(localKey) || !clanMemberKeys.contains(key) || !isValidPosition(pos))
 			{
 				continue;
 			}
