@@ -1,0 +1,8 @@
+name = "lobsterpot-positions"
+main = "worker.js"
+compatibility_date = "2024-01-01"
+workers_dev = true
+
+[[kv_namespaces]]
+binding = "POSITIONS"
+id = "beaebf08ca2d409da579d4d56a2af5c1"

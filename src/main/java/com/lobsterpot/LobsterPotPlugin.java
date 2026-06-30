@@ -1,6 +1,8 @@
 package com.lobsterpot;
 
+import com.google.inject.Provides;
 import com.lobsterpot.ClanMembershipService.ClanAccess;
+import com.lobsterpot.feed.FeedBroadcast;
 import com.lobsterpot.feed.FeedMember;
 import com.lobsterpot.feed.FeedNextRank;
 import com.lobsterpot.feed.PluginFeed;
@@ -8,13 +10,22 @@ import com.lobsterpot.feed.PluginFeedClient;
 import com.lobsterpot.requirements.RankRequirementEvaluation;
 import com.lobsterpot.requirements.RankRequirementEvaluator;
 import com.lobsterpot.ui.LobsterPotPanel;
+import com.lobsterpot.worldmap.ClanPositionService;
+import com.lobsterpot.worldmap.ClanPositionWorldMapOverlay;
 import java.awt.image.BufferedImage;
+import java.time.Instant;
+import java.time.OffsetDateTime;
 import java.util.concurrent.atomic.AtomicInteger;
 import javax.inject.Inject;
 import javax.swing.SwingUtilities;
+import net.runelite.api.ChatMessageType;
+import net.runelite.api.Client;
 import net.runelite.api.GameState;
 import net.runelite.api.events.ClanChannelChanged;
 import net.runelite.api.events.GameStateChanged;
+import net.runelite.api.events.GameTick;
+import net.runelite.api.events.MenuEntryAdded;
+import net.runelite.api.events.PostMenuSort;
 import net.runelite.client.callback.ClientThread;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
@@ -22,12 +33,14 @@ import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.ui.ClientToolbar;
 import net.runelite.client.ui.NavigationButton;
+import net.runelite.client.ui.overlay.OverlayManager;
 import net.runelite.client.util.ImageUtil;
+import net.runelite.client.util.Text;
 
 @PluginDescriptor(
 	name = "The Lobster Pot",
-	description = "Clan companion for LobsterPot members.",
-	tags = {"clan", "lobster", "pot"}
+	description = "Clan companion for LobsterPot members with broadcasts, events, rank progress, and clan world map locations.",
+	tags = {"clan", "lobster", "pot", "broadcast", "events", "map", "world"}
 )
 public class LobsterPotPlugin extends Plugin
 {
@@ -46,7 +59,13 @@ public class LobsterPotPlugin extends Plugin
 	private ClientThread clientThread;
 
 	@Inject
+	private Client client;
+
+	@Inject
 	private ClientToolbar clientToolbar;
+
+	@Inject
+	private OverlayManager overlayManager;
 
 	@Inject
 	private ConfigManager configManager;
@@ -63,10 +82,23 @@ public class LobsterPotPlugin extends Plugin
 	@Inject
 	private LobsterPotPanel panel;
 
+	@Inject
+	private ClanPositionService clanPositionService;
+
+	@Inject
+	private ClanPositionWorldMapOverlay clanPositionWorldMapOverlay;
+
+	@Inject
+	private LobsterPotConfig config;
+
 	private NavigationButton navButton;
 	private volatile ClanAccess currentAccess;
 	private volatile PluginFeed currentFeed;
 	private final AtomicInteger requirementRequestId = new AtomicInteger();
+	private final Object broadcastAnnouncementLock = new Object();
+	private boolean loggedIn;
+	private boolean announceBroadcastAfterFeedLoad;
+	private String announcedLoginBroadcastKey;
 
 	@Override
 	protected void startUp()
@@ -83,23 +115,73 @@ public class LobsterPotPlugin extends Plugin
 			.build();
 		clientToolbar.addNavigation(navButton);
 
+		clanPositionService.start();
+		overlayManager.add(clanPositionWorldMapOverlay);
+
+		loggedIn = client.getGameState() == GameState.LOGGED_IN;
+		if (loggedIn)
+		{
+			queueLoginBroadcastAnnouncement();
+		}
 		refreshAll();
 	}
 
 	@Override
 	protected void shutDown()
 	{
+		clanPositionService.stop();
+		overlayManager.remove(clanPositionWorldMapOverlay);
 		clientToolbar.removeNavigation(navButton);
 		navButton = null;
 	}
 
 	@Subscribe
+	public void onGameTick(GameTick event)
+	{
+		clanPositionService.onTick(currentAccess, config.shareWorldMapLocation());
+	}
+
+	@Subscribe
+	public void onMenuEntryAdded(MenuEntryAdded event)
+	{
+		clanPositionService.addHopMenuEntry(event);
+	}
+
+	@Subscribe
+	public void onPostMenuSort(PostMenuSort event)
+	{
+		clanPositionService.addHoveredMapMenuEntry();
+		clanPositionService.rewriteHopMenuEntries();
+	}
+
+	@Subscribe
 	public void onGameStateChanged(GameStateChanged event)
 	{
-		if (event.getGameState() == GameState.LOGGED_IN
-			|| event.getGameState() == GameState.LOGIN_SCREEN
-			|| event.getGameState() == GameState.HOPPING)
+		if (event.getGameState() == GameState.LOGGED_IN)
 		{
+			final boolean justLoggedIn = !loggedIn;
+			loggedIn = true;
+			if (justLoggedIn)
+			{
+				queueLoginBroadcastAnnouncement();
+				refreshFeed();
+			}
+			refreshAccess();
+			return;
+		}
+
+		if (event.getGameState() == GameState.LOGIN_SCREEN)
+		{
+			loggedIn = false;
+			clearLoginBroadcastAnnouncement();
+			clanPositionService.clearPoints();
+			refreshAccess();
+			return;
+		}
+
+		if (event.getGameState() == GameState.HOPPING)
+		{
+			clanPositionService.clearPoints();
 			refreshAccess();
 		}
 	}
@@ -119,7 +201,12 @@ public class LobsterPotPlugin extends Plugin
 		{
 			final ClanAccess access = clanMembershipService.checkAccess();
 			currentAccess = access;
+			if (!access.isAllowed())
+			{
+				clanPositionService.clearPoints();
+			}
 			SwingUtilities.invokeLater(() -> panel.render(access));
+			tryAnnounceLoginBroadcast();
 			evaluateRankRequirement();
 		});
 	}
@@ -142,6 +229,7 @@ public class LobsterPotPlugin extends Plugin
 			{
 				currentFeed = feed;
 				SwingUtilities.invokeLater(() -> panel.renderFeed(feed, null));
+				tryAnnounceLoginBroadcast();
 				evaluateRankRequirement();
 			}
 
@@ -153,6 +241,186 @@ public class LobsterPotPlugin extends Plugin
 				SwingUtilities.invokeLater(() -> panel.renderFeed(null, error));
 			}
 		});
+	}
+
+	private void queueLoginBroadcastAnnouncement()
+	{
+		synchronized (broadcastAnnouncementLock)
+		{
+			announceBroadcastAfterFeedLoad = true;
+			announcedLoginBroadcastKey = null;
+		}
+		currentAccess = null;
+		currentFeed = null;
+	}
+
+	private void clearLoginBroadcastAnnouncement()
+	{
+		synchronized (broadcastAnnouncementLock)
+		{
+			announceBroadcastAfterFeedLoad = false;
+			announcedLoginBroadcastKey = null;
+		}
+	}
+
+	private void tryAnnounceLoginBroadcast()
+	{
+		final FeedBroadcast broadcast;
+		final String broadcastKey;
+		synchronized (broadcastAnnouncementLock)
+		{
+			if (!announceBroadcastAfterFeedLoad)
+			{
+				return;
+			}
+
+			final ClanAccess access = currentAccess;
+			final PluginFeed feed = currentFeed;
+			if (access == null || feed == null)
+			{
+				return;
+			}
+			if (!access.isAllowed())
+			{
+				announceBroadcastAfterFeedLoad = false;
+				return;
+			}
+
+			broadcast = currentActiveBroadcast(feed);
+			announceBroadcastAfterFeedLoad = false;
+			if (broadcast == null)
+			{
+				return;
+			}
+
+			broadcastKey = broadcastKey(broadcast);
+			if (broadcastKey.equals(announcedLoginBroadcastKey))
+			{
+				return;
+			}
+			announcedLoginBroadcastKey = broadcastKey;
+		}
+
+		final String message = broadcastChatMessage(broadcast);
+		if (!hasText(message))
+		{
+			return;
+		}
+
+		clientThread.invoke(() ->
+		{
+			if (client.getGameState() == GameState.LOGGED_IN)
+			{
+				client.addChatMessage(ChatMessageType.GAMEMESSAGE, "", message, null);
+			}
+		});
+	}
+
+	private static FeedBroadcast currentActiveBroadcast(PluginFeed feed)
+	{
+		if (feed == null)
+		{
+			return null;
+		}
+
+		final Instant now = Instant.now();
+		for (FeedBroadcast broadcast : feed.getBroadcasts())
+		{
+			if (isActiveBroadcast(broadcast, now))
+			{
+				return broadcast;
+			}
+		}
+		return null;
+	}
+
+	private static boolean isActiveBroadcast(FeedBroadcast broadcast, Instant now)
+	{
+		if (broadcast == null || (!hasText(broadcast.getTitle()) && !hasText(broadcast.getMessage())))
+		{
+			return false;
+		}
+
+		final Instant start = parseInstant(broadcast.getStartsAt());
+		if (start != null && now.isBefore(start))
+		{
+			return false;
+		}
+
+		final Instant expires = parseInstant(broadcast.getExpiresAt());
+		return expires == null || now.isBefore(expires);
+	}
+
+	private static String broadcastChatMessage(FeedBroadcast broadcast)
+	{
+		final String title = cleanChatPart(broadcast.getTitle());
+		final String message = cleanChatPart(broadcast.getMessage());
+		if (hasText(title) && hasText(message))
+		{
+			return "The Lobster Pot broadcast: " + title + " - " + message;
+		}
+		if (hasText(title))
+		{
+			return "The Lobster Pot broadcast: " + title;
+		}
+		if (hasText(message))
+		{
+			return "The Lobster Pot broadcast: " + message;
+		}
+		return null;
+	}
+
+	private static String cleanChatPart(String value)
+	{
+		if (!hasText(value))
+		{
+			return null;
+		}
+		return Text.escapeJagex(Text.sanitizeMultilineText(value).replaceAll("\\s+", " ").trim());
+	}
+
+	private static String broadcastKey(FeedBroadcast broadcast)
+	{
+		if (hasText(broadcast.getId()))
+		{
+			return broadcast.getId().trim();
+		}
+		return firstNonBlank(broadcast.getTitle(), "") + "|" + firstNonBlank(broadcast.getMessage(), "");
+	}
+
+	private static String firstNonBlank(String... values)
+	{
+		for (String value : values)
+		{
+			if (hasText(value))
+			{
+				return value.trim();
+			}
+		}
+		return "";
+	}
+
+	private static Instant parseInstant(String value)
+	{
+		if (!hasText(value))
+		{
+			return null;
+		}
+		try
+		{
+			return OffsetDateTime.parse(value.trim()).toInstant();
+		}
+		catch (Exception ignored)
+		{
+			try
+			{
+				return Instant.parse(value.trim());
+			}
+			catch (Exception alsoIgnored)
+			{
+				return null;
+			}
+		}
 	}
 
 	private void evaluateRankRequirement()
@@ -244,6 +512,12 @@ public class LobsterPotPlugin extends Plugin
 	private static boolean hasText(String value)
 	{
 		return value != null && !value.trim().isEmpty();
+	}
+
+	@Provides
+	LobsterPotConfig provideConfig(ConfigManager configManager)
+	{
+		return configManager.getConfig(LobsterPotConfig.class);
 	}
 
 	private void clearLegacyConfig()

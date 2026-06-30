@@ -12,6 +12,11 @@ next-rank progress, and pending claims. Broadcasts and events are visible even b
 member profile details are matched to the logged-in LobsterPot character. Because this is an
 external request, RuneLite should be expected to show its third-party IP warning.
 
+When the clan world map is enabled, the plugin also sends the logged-in character name, world,
+world-map tile position, plane, and detected activity to the LobsterPot positions backend. The
+backend stores recent positions briefly so other LobsterPot members can see each other on the world
+map. Posting can be disabled from the plugin config with `Share world map location`.
+
 ## Current behavior
 
 - Checks the active character's RuneScape clan membership through RuneLite's clan APIs.
@@ -21,10 +26,12 @@ external request, RuneLite should be expected to show its third-party IP warning
 - Shows Discord-bot profile data for the logged-in LobsterPot character, including rank, join date,
   point totals, next-rank progress, and pending claims.
 - Fetches public broadcasts/events from the built-in GitHub feed URL without requiring login.
+- Shows LobsterPot members on the RuneLite world map, including their world, rank icon, and detected
+  activity when available.
 
 ## Configuration
 
-No end-user configuration is required.
+- `Share world map location`: share this character's current world-map position with the clan map.
 
 ## Building
 
@@ -40,7 +47,8 @@ Requires a JDK 11 or newer. From the project root:
 ## Plugin Hub submission
 
 The plugin is BSD 2-Clause licensed, targets Java 11, uses `build=standard`, and has no bundled
-third-party dependencies. It does make an external read-only request to the built-in GitHub feed URL.
+third-party dependencies. It makes external requests to the built-in GitHub feed URL and to the
+LobsterPot positions backend for the clan world map.
 
 ## License
 
