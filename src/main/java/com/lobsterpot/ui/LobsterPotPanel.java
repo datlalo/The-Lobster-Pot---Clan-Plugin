@@ -459,11 +459,6 @@ public class LobsterPotPanel extends PluginPanel
 		}
 
 		row.add(verticalGap(6));
-		if (Boolean.TRUE.equals(nextRank.getCanClaim()))
-		{
-			row.add(statusLine(CHECK + " " + requirementText + " complete", ALLOWED_COLOR));
-			return;
-		}
 		if (currentRequirementEvaluation != null
 			&& currentRequirementEvaluation.getStatus() == RankRequirementEvaluation.Status.MET)
 		{
@@ -479,8 +474,7 @@ public class LobsterPotPanel extends PluginPanel
 		final int missingMonths = positive(nextRank.getMissingMonths());
 		final String requirementText = specialRequirementText(nextRank);
 		final boolean hasRequirement = hasText(requirementText);
-		final boolean canClaim = Boolean.TRUE.equals(nextRank.getCanClaim());
-		final boolean requirementMet = !hasRequirement || canClaim
+		final boolean requirementMet = !hasRequirement
 			|| (currentRequirementEvaluation != null
 			&& currentRequirementEvaluation.getStatus() == RankRequirementEvaluation.Status.MET);
 
@@ -504,7 +498,7 @@ public class LobsterPotPanel extends PluginPanel
 			row.add(statusLine(CHECK + " Time requirement met", ALLOWED_COLOR));
 		}
 
-		addSpecialRequirementBlocker(row, requirementText, canClaim);
+		addSpecialRequirementBlocker(row, requirementText);
 
 		if (missingPoints == 0 && missingMonths == 0 && requirementMet)
 		{
@@ -512,15 +506,10 @@ public class LobsterPotPanel extends PluginPanel
 		}
 	}
 
-	private void addSpecialRequirementBlocker(JPanel row, String requirementText, boolean canClaim)
+	private void addSpecialRequirementBlocker(JPanel row, String requirementText)
 	{
 		if (!hasText(requirementText))
 		{
-			return;
-		}
-		if (canClaim)
-		{
-			row.add(statusLine(CHECK + " Special requirement met", ALLOWED_COLOR));
 			return;
 		}
 		if (currentRequirementEvaluation == null)
