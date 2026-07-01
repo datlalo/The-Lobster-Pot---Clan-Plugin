@@ -5,14 +5,11 @@ import com.google.gson.JsonSyntaxException;
 import com.lobsterpot.ClanMembershipService.ClanAccess;
 import java.awt.Rectangle;
 import java.awt.image.BufferedImage;
-import java.lang.reflect.Field;
-import java.lang.reflect.Modifier;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -843,106 +840,282 @@ public class ClanPositionService
 
 	private static Map<Integer, String> buildActivityByAnimation()
 	{
-		final Map<Integer, String> activities = new LinkedHashMap<>();
-		for (Field field : AnimationID.class.getFields())
-		{
-			if (field.getType() != int.class || !Modifier.isStatic(field.getModifiers()))
-			{
-				continue;
-			}
-
-			final String activity = activityForAnimationName(field.getName());
-			if (!hasText(activity))
-			{
-				continue;
-			}
-
-			try
-			{
-				activities.put(field.getInt(null), activity);
-			}
-			catch (IllegalAccessException ignored)
-			{
-			}
-		}
+		final Map<Integer, String> activities = new HashMap<>();
+		addActivity(activities, "Woodcutting",
+			AnimationID.WOODCUTTING_BRONZE,
+			AnimationID.WOODCUTTING_IRON,
+			AnimationID.WOODCUTTING_STEEL,
+			AnimationID.WOODCUTTING_BLACK,
+			AnimationID.WOODCUTTING_MITHRIL,
+			AnimationID.WOODCUTTING_ADAMANT,
+			AnimationID.WOODCUTTING_RUNE,
+			AnimationID.WOODCUTTING_GILDED,
+			AnimationID.WOODCUTTING_DRAGON,
+			AnimationID.WOODCUTTING_DRAGON_OR,
+			AnimationID.WOODCUTTING_INFERNAL,
+			AnimationID.WOODCUTTING_3A_AXE,
+			AnimationID.WOODCUTTING_CRYSTAL,
+			AnimationID.WOODCUTTING_TRAILBLAZER,
+			AnimationID.WOODCUTTING_2H_BRONZE,
+			AnimationID.WOODCUTTING_2H_IRON,
+			AnimationID.WOODCUTTING_2H_STEEL,
+			AnimationID.WOODCUTTING_2H_BLACK,
+			AnimationID.WOODCUTTING_2H_MITHRIL,
+			AnimationID.WOODCUTTING_2H_ADAMANT,
+			AnimationID.WOODCUTTING_2H_RUNE,
+			AnimationID.WOODCUTTING_2H_DRAGON,
+			AnimationID.WOODCUTTING_2H_CRYSTAL,
+			AnimationID.WOODCUTTING_2H_CRYSTAL_INACTIVE,
+			AnimationID.WOODCUTTING_2H_3A,
+			AnimationID.WOODCUTTING_ENT_BRONZE,
+			AnimationID.WOODCUTTING_ENT_IRON,
+			AnimationID.WOODCUTTING_ENT_STEEL,
+			AnimationID.WOODCUTTING_ENT_BLACK,
+			AnimationID.WOODCUTTING_ENT_MITHRIL,
+			AnimationID.WOODCUTTING_ENT_ADAMANT,
+			AnimationID.WOODCUTTING_ENT_RUNE,
+			AnimationID.WOODCUTTING_ENT_GILDED,
+			AnimationID.WOODCUTTING_ENT_DRAGON,
+			AnimationID.WOODCUTTING_ENT_DRAGON_OR,
+			AnimationID.WOODCUTTING_ENT_INFERNAL,
+			AnimationID.WOODCUTTING_ENT_INFERNAL_OR,
+			AnimationID.WOODCUTTING_ENT_3A,
+			AnimationID.WOODCUTTING_ENT_CRYSTAL,
+			AnimationID.WOODCUTTING_ENT_CRYSTAL_INACTIVE,
+			AnimationID.WOODCUTTING_ENT_TRAILBLAZER,
+			AnimationID.WOODCUTTING_ENT_2H_BRONZE,
+			AnimationID.WOODCUTTING_ENT_2H_IRON,
+			AnimationID.WOODCUTTING_ENT_2H_STEEL,
+			AnimationID.WOODCUTTING_ENT_2H_BLACK,
+			AnimationID.WOODCUTTING_ENT_2H_MITHRIL,
+			AnimationID.WOODCUTTING_ENT_2H_ADAMANT,
+			AnimationID.WOODCUTTING_ENT_2H_RUNE,
+			AnimationID.WOODCUTTING_ENT_2H_DRAGON,
+			AnimationID.WOODCUTTING_ENT_2H_CRYSTAL,
+			AnimationID.WOODCUTTING_ENT_2H_CRYSTAL_INACTIVE,
+			AnimationID.WOODCUTTING_ENT_2H_3A);
+		addActivity(activities, "Mining",
+			AnimationID.MINING_BRONZE_PICKAXE,
+			AnimationID.MINING_IRON_PICKAXE,
+			AnimationID.MINING_STEEL_PICKAXE,
+			AnimationID.MINING_BLACK_PICKAXE,
+			AnimationID.MINING_MITHRIL_PICKAXE,
+			AnimationID.MINING_ADAMANT_PICKAXE,
+			AnimationID.MINING_RUNE_PICKAXE,
+			AnimationID.MINING_GILDED_PICKAXE,
+			AnimationID.MINING_DRAGON_PICKAXE,
+			AnimationID.MINING_DRAGON_PICKAXE_UPGRADED,
+			AnimationID.MINING_DRAGON_PICKAXE_OR,
+			AnimationID.MINING_DRAGON_PICKAXE_OR_TRAILBLAZER,
+			AnimationID.MINING_INFERNAL_PICKAXE,
+			AnimationID.MINING_3A_PICKAXE,
+			AnimationID.MINING_CRYSTAL_PICKAXE,
+			AnimationID.MINING_TRAILBLAZER_PICKAXE,
+			AnimationID.MINING_TRAILBLAZER_PICKAXE_2,
+			AnimationID.MINING_TRAILBLAZER_PICKAXE_3,
+			AnimationID.MINING_MOTHERLODE_BRONZE,
+			AnimationID.MINING_MOTHERLODE_IRON,
+			AnimationID.MINING_MOTHERLODE_STEEL,
+			AnimationID.MINING_MOTHERLODE_BLACK,
+			AnimationID.MINING_MOTHERLODE_MITHRIL,
+			AnimationID.MINING_MOTHERLODE_ADAMANT,
+			AnimationID.MINING_MOTHERLODE_RUNE,
+			AnimationID.MINING_MOTHERLODE_GILDED,
+			AnimationID.MINING_MOTHERLODE_DRAGON,
+			AnimationID.MINING_MOTHERLODE_DRAGON_UPGRADED,
+			AnimationID.MINING_MOTHERLODE_DRAGON_OR,
+			AnimationID.MINING_MOTHERLODE_DRAGON_OR_TRAILBLAZER,
+			AnimationID.MINING_MOTHERLODE_INFERNAL,
+			AnimationID.MINING_MOTHERLODE_3A,
+			AnimationID.MINING_MOTHERLODE_CRYSTAL,
+			AnimationID.MINING_MOTHERLODE_TRAILBLAZER,
+			AnimationID.MINING_CRASHEDSTAR_BRONZE,
+			AnimationID.MINING_CRASHEDSTAR_IRON,
+			AnimationID.MINING_CRASHEDSTAR_STEEL,
+			AnimationID.MINING_CRASHEDSTAR_BLACK,
+			AnimationID.MINING_CRASHEDSTAR_MITHRIL,
+			AnimationID.MINING_CRASHEDSTAR_ADAMANT,
+			AnimationID.MINING_CRASHEDSTAR_RUNE,
+			AnimationID.MINING_CRASHEDSTAR_GILDED,
+			AnimationID.MINING_CRASHEDSTAR_DRAGON,
+			AnimationID.MINING_CRASHEDSTAR_DRAGON_UPGRADED,
+			AnimationID.MINING_CRASHEDSTAR_DRAGON_OR,
+			AnimationID.MINING_CRASHEDSTAR_DRAGON_OR_TRAILBLAZER,
+			AnimationID.MINING_CRASHEDSTAR_INFERNAL,
+			AnimationID.MINING_CRASHEDSTAR_3A,
+			AnimationID.MINING_CRASHEDSTAR_CRYSTAL,
+			AnimationID.DENSE_ESSENCE_CHIPPING,
+			AnimationID.DENSE_ESSENCE_CHISELING);
+		addActivity(activities, "Fishing",
+			AnimationID.FISHING_BIG_NET,
+			AnimationID.FISHING_NET,
+			AnimationID.FISHING_POLE_CAST,
+			AnimationID.FISHING_CAGE,
+			AnimationID.FISHING_HARPOON,
+			AnimationID.FISHING_BARBTAIL_HARPOON,
+			AnimationID.FISHING_DRAGON_HARPOON,
+			AnimationID.FISHING_DRAGON_HARPOON_OR,
+			AnimationID.FISHING_INFERNAL_HARPOON,
+			AnimationID.FISHING_CRYSTAL_HARPOON,
+			AnimationID.FISHING_TRAILBLAZER_HARPOON,
+			AnimationID.FISHING_OILY_ROD,
+			AnimationID.FISHING_KARAMBWAN,
+			AnimationID.FISHING_CRUSHING_INFERNAL_EELS,
+			AnimationID.FISHING_CRUSHING_INFERNAL_EELS_IMCANDO_HAMMER,
+			AnimationID.FISHING_CUTTING_SACRED_EELS,
+			AnimationID.FISHING_BAREHAND,
+			AnimationID.FISHING_BAREHAND_WINDUP_1,
+			AnimationID.FISHING_BAREHAND_WINDUP_2,
+			AnimationID.FISHING_BAREHAND_CAUGHT_SHARK_1,
+			AnimationID.FISHING_BAREHAND_CAUGHT_SHARK_2,
+			AnimationID.FISHING_BAREHAND_CAUGHT_SWORDFISH_1,
+			AnimationID.FISHING_BAREHAND_CAUGHT_SWORDFISH_2,
+			AnimationID.FISHING_BAREHAND_CAUGHT_TUNA_1,
+			AnimationID.FISHING_BAREHAND_CAUGHT_TUNA_2,
+			AnimationID.FISHING_PEARL_ROD,
+			AnimationID.FISHING_PEARL_FLY_ROD,
+			AnimationID.FISHING_PEARL_BARBARIAN_ROD,
+			AnimationID.FISHING_PEARL_ROD_2,
+			AnimationID.FISHING_PEARL_FLY_ROD_2,
+			AnimationID.FISHING_PEARL_BARBARIAN_ROD_2,
+			AnimationID.FISHING_PEARL_OILY_ROD,
+			AnimationID.FISHING_BARBARIAN_ROD);
+		addActivity(activities, "Cooking",
+			AnimationID.COOKING_FIRE,
+			AnimationID.COOKING_RANGE,
+			AnimationID.COOKING_WINE);
+		addActivity(activities, "Smithing",
+			AnimationID.SMITHING_SMELTING,
+			AnimationID.SMITHING_CANNONBALL,
+			AnimationID.SMITHING_ANVIL,
+			AnimationID.SMITHING_IMCANDO_HAMMER,
+			AnimationID.GIANTS_FOUNDRY_WATER_WHEEL_SPINNING);
+		addActivity(activities, "Fletching",
+			AnimationID.FLETCHING_BOW_CUTTING,
+			AnimationID.FLETCHING_ATTACH_STOCK_TO_BRONZE_LIMBS,
+			AnimationID.FLETCHING_ATTACH_STOCK_TO_BLURITE_LIMBS,
+			AnimationID.FLETCHING_ATTACH_STOCK_TO_IRON_LIMBS,
+			AnimationID.FLETCHING_ATTACH_STOCK_TO_STEEL_LIMBS,
+			AnimationID.FLETCHING_ATTACH_STOCK_TO_MITHRIL_LIMBS,
+			AnimationID.FLETCHING_ATTACH_STOCK_TO_ADAMANTITE_LIMBS,
+			AnimationID.FLETCHING_ATTACH_STOCK_TO_RUNITE_LIMBS,
+			AnimationID.FLETCHING_ATTACH_STOCK_TO_DRAGON_LIMBS,
+			AnimationID.FLETCHING_STRING_NORMAL_SHORTBOW,
+			AnimationID.FLETCHING_STRING_NORMAL_LONGBOW,
+			AnimationID.FLETCHING_STRING_OAK_SHORTBOW,
+			AnimationID.FLETCHING_STRING_OAK_LONGBOW,
+			AnimationID.FLETCHING_STRING_WILLOW_SHORTBOW,
+			AnimationID.FLETCHING_STRING_WILLOW_LONGBOW,
+			AnimationID.FLETCHING_STRING_MAPLE_SHORTBOW,
+			AnimationID.FLETCHING_STRING_MAPLE_LONGBOW,
+			AnimationID.FLETCHING_STRING_YEW_SHORTBOW,
+			AnimationID.FLETCHING_STRING_YEW_LONGBOW,
+			AnimationID.FLETCHING_STRING_MAGIC_SHORTBOW,
+			AnimationID.FLETCHING_STRING_MAGIC_LONGBOW,
+			AnimationID.FLETCHING_ATTACH_BOLT_TIPS_TO_BRONZE_BOLT,
+			AnimationID.FLETCHING_ATTACH_BOLT_TIPS_TO_IRON_BROAD_BOLT,
+			AnimationID.FLETCHING_ATTACH_BOLT_TIPS_TO_BLURITE_BOLT,
+			AnimationID.FLETCHING_ATTACH_BOLT_TIPS_TO_STEEL_BOLT,
+			AnimationID.FLETCHING_ATTACH_BOLT_TIPS_TO_MITHRIL_BOLT,
+			AnimationID.FLETCHING_ATTACH_BOLT_TIPS_TO_ADAMANT_BOLT,
+			AnimationID.FLETCHING_ATTACH_BOLT_TIPS_TO_RUNE_BOLT,
+			AnimationID.FLETCHING_ATTACH_BOLT_TIPS_TO_DRAGON_BOLT,
+			AnimationID.FLETCHING_ATTACH_HEADS,
+			AnimationID.FLETCHING_ATTACH_FEATHERS_TO_ARROWSHAFT);
+		addActivity(activities, "Crafting",
+			AnimationID.GEM_CUTTING_OPAL,
+			AnimationID.GEM_CUTTING_JADE,
+			AnimationID.GEM_CUTTING_REDTOPAZ,
+			AnimationID.GEM_CUTTING_SAPPHIRE,
+			AnimationID.GEM_CUTTING_EMERALD,
+			AnimationID.GEM_CUTTING_RUBY,
+			AnimationID.GEM_CUTTING_DIAMOND,
+			AnimationID.GEM_CUTTING_AMETHYST,
+			AnimationID.CRAFTING_LEATHER,
+			AnimationID.CRAFTING_GLASSBLOWING,
+			AnimationID.CRAFTING_SPINNING,
+			AnimationID.CRAFTING_POTTERS_WHEEL,
+			AnimationID.CRAFTING_POTTERY_OVEN,
+			AnimationID.CRAFTING_LOOM,
+			AnimationID.CRAFTING_CRUSH_BLESSED_BONES,
+			AnimationID.CRAFTING_BATTLESTAVES,
+			AnimationID.CHURN_MILK_SHORT,
+			AnimationID.CHURN_MILK_MEDIUM,
+			AnimationID.CHURN_MILK_LONG);
+		addActivity(activities, "Herblore",
+			AnimationID.HERBLORE_PESTLE_AND_MORTAR,
+			AnimationID.HERBLORE_MAKE_TAR,
+			AnimationID.HERBLORE_POTIONMAKING,
+			AnimationID.HERBLORE_MIXOLOGY_CONCENTRATE,
+			AnimationID.HERBLORE_MIXOLOGY_CRYSTALIZE,
+			AnimationID.HERBLORE_MIXOLOGY_HOMOGENIZE,
+			AnimationID.HERBLORE_MIXOLOGY_REFINER);
+		addActivity(activities, "Firemaking",
+			AnimationID.FIREMAKING,
+			AnimationID.FIREMAKING_FORESTERS_CAMPFIRE_ARCTIC_PINE,
+			AnimationID.FIREMAKING_FORESTERS_CAMPFIRE_BLISTERWOOD,
+			AnimationID.FIREMAKING_FORESTERS_CAMPFIRE_LOGS,
+			AnimationID.FIREMAKING_FORESTERS_CAMPFIRE_MAGIC,
+			AnimationID.FIREMAKING_FORESTERS_CAMPFIRE_MAHOGANY,
+			AnimationID.FIREMAKING_FORESTERS_CAMPFIRE_MAPLE,
+			AnimationID.FIREMAKING_FORESTERS_CAMPFIRE_OAK,
+			AnimationID.FIREMAKING_FORESTERS_CAMPFIRE_REDWOOD,
+			AnimationID.FIREMAKING_FORESTERS_CAMPFIRE_TEAK,
+			AnimationID.FIREMAKING_FORESTERS_CAMPFIRE_WILLOW,
+			AnimationID.FIREMAKING_FORESTERS_CAMPFIRE_YEW);
+		addActivity(activities, "Casting Magic",
+			AnimationID.MAGIC_CHARGING_ORBS,
+			AnimationID.MAGIC_MAKE_TABLET,
+			AnimationID.MAGIC_ENCHANTING_JEWELRY,
+			AnimationID.MAGIC_ENCHANTING_AMULET_1,
+			AnimationID.MAGIC_ENCHANTING_AMULET_2,
+			AnimationID.MAGIC_ENCHANTING_AMULET_3,
+			AnimationID.MAGIC_ENCHANTING_BOLTS,
+			AnimationID.MAGIC_LUNAR_SHARED,
+			AnimationID.MAGIC_LUNAR_CURE_PLANT,
+			AnimationID.MAGIC_LUNAR_PLANK_MAKE,
+			AnimationID.MAGIC_LUNAR_STRING_JEWELRY,
+			AnimationID.MAGIC_ARCEUUS_RESURRECT_CROPS,
+			AnimationID.MAGIC_ARCEUUS_DEMONBANE);
+		addActivity(activities, "Thieving",
+			AnimationID.THIEVING_VARLAMORE_STEALING_VALUABLES);
+		addActivity(activities, "Hunter",
+			AnimationID.HUNTER_LAY_BOXTRAP_BIRDSNARE,
+			AnimationID.HUNTER_LAY_NETTRAP,
+			AnimationID.HUNTER_LAY_MANIACAL_MONKEY_BOULDER_TRAP,
+			AnimationID.HUNTER_CHECK_BIRD_SNARE);
+		addActivity(activities, "Construction",
+			AnimationID.CONSTRUCTION,
+			AnimationID.CONSTRUCTION_IMCANDO,
+			AnimationID.HOME_MAKE_TABLET,
+			AnimationID.PISCARILIUS_CRANE_REPAIR);
+		addActivity(activities, "Farming",
+			AnimationID.FARMING_HARVEST_FRUIT_TREE,
+			AnimationID.FARMING_HARVEST_BUSH,
+			AnimationID.FARMING_HARVEST_HERB,
+			AnimationID.FARMING_USE_COMPOST,
+			AnimationID.FARMING_CURE_WITH_POTION,
+			AnimationID.FARMING_PLANT_SEED,
+			AnimationID.FARMING_HARVEST_FLOWER,
+			AnimationID.FARMING_MIX_ULTRACOMPOST,
+			AnimationID.FARMING_HARVEST_ALLOTMENT);
+		addActivity(activities, "Prayer",
+			AnimationID.BURYING_BONES,
+			AnimationID.USING_GILDED_ALTAR,
+			AnimationID.ECTOFUNTUS_FILL_SLIME_BUCKET,
+			AnimationID.ECTOFUNTUS_GRIND_BONES,
+			AnimationID.ECTOFUNTUS_INSERT_BONES,
+			AnimationID.ECTOFUNTUS_EMPTY_BIN);
+		addActivity(activities, "Digging", AnimationID.DIG);
 		return Collections.unmodifiableMap(activities);
 	}
 
-	private static String activityForAnimationName(String animationName)
+	private static void addActivity(Map<Integer, String> activities, String activity, int... animationIds)
 	{
-		if (animationName.startsWith("WOODCUTTING"))
+		for (int animationId : animationIds)
 		{
-			return "Woodcutting";
+			activities.put(animationId, activity);
 		}
-		if (animationName.startsWith("MINING") || animationName.startsWith("DENSE_ESSENCE"))
-		{
-			return "Mining";
-		}
-		if (animationName.startsWith("FISHING"))
-		{
-			return "Fishing";
-		}
-		if (animationName.startsWith("COOKING"))
-		{
-			return "Cooking";
-		}
-		if (animationName.startsWith("SMITHING") || animationName.startsWith("GIANTS_FOUNDRY"))
-		{
-			return "Smithing";
-		}
-		if (animationName.startsWith("FLETCHING"))
-		{
-			return "Fletching";
-		}
-		if (animationName.startsWith("CRAFTING") || animationName.startsWith("GEM_CUTTING") || animationName.startsWith("CHURN_MILK"))
-		{
-			return "Crafting";
-		}
-		if (animationName.startsWith("HERBLORE"))
-		{
-			return "Herblore";
-		}
-		if (animationName.startsWith("FIREMAKING"))
-		{
-			return "Firemaking";
-		}
-		if (animationName.startsWith("MAGIC"))
-		{
-			return "Casting Magic";
-		}
-		if (animationName.startsWith("AGILITY"))
-		{
-			return "Agility";
-		}
-		if (animationName.startsWith("THIEVING"))
-		{
-			return "Thieving";
-		}
-		if (animationName.startsWith("HUNTER"))
-		{
-			return "Hunter";
-		}
-		if (animationName.startsWith("RUNECRAFT"))
-		{
-			return "Runecraft";
-		}
-		if (animationName.startsWith("CONSTRUCTION") || animationName.startsWith("HOME_MAKE_TABLET") || animationName.startsWith("PISCARILIUS_CRANE_REPAIR"))
-		{
-			return "Construction";
-		}
-		if (animationName.startsWith("FARMING"))
-		{
-			return "Farming";
-		}
-		if (animationName.startsWith("BURYING_BONES") || animationName.startsWith("USING_GILDED_ALTAR") || animationName.startsWith("ECTOFUNTUS"))
-		{
-			return "Prayer";
-		}
-		if (animationName.startsWith("DIG"))
-		{
-			return "Digging";
-		}
-		return "";
 	}
 
 	private static String sanitizeActivity(String activity)
