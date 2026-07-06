@@ -19,14 +19,17 @@ public class ClanPositionWorldMapOverlay extends Overlay
 	{
 		this.clanPositionService = clanPositionService;
 		setPosition(OverlayPosition.DYNAMIC);
-		setPriority(PRIORITY_HIGH);
-		setLayer(OverlayLayer.MANUAL);
+		setPriority(PRIORITY_HIGHEST);
+		setLayer(OverlayLayer.ALWAYS_ON_TOP);
 		drawAfterInterface(InterfaceID.WORLD_MAP);
 	}
 
 	@Override
 	public Dimension render(Graphics2D graphics)
 	{
+		clanPositionService.renderMapFinder(graphics);
+		clanPositionService.renderConfirmPrompt(graphics);
+		clanPositionService.renderLayerFocusCover(graphics);
 		clanPositionService.addHoveredMapMenuEntry();
 		return null;
 	}

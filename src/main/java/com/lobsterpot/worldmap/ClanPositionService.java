@@ -3,10 +3,15 @@ package com.lobsterpot.worldmap;
 import com.google.gson.Gson;
 import com.google.gson.JsonSyntaxException;
 import com.lobsterpot.ClanMembershipService.ClanAccess;
+import java.awt.BasicStroke;
+import java.awt.Color;
+import java.awt.FontMetrics;
+import java.awt.Graphics2D;
 import java.awt.Rectangle;
 import java.awt.image.BufferedImage;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -16,6 +21,7 @@ import java.util.Map;
 import java.util.Set;
 import javax.inject.Inject;
 import javax.inject.Singleton;
+import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.Actor;
 import net.runelite.api.AnimationID;
 import net.runelite.api.ChatMessageType;
@@ -38,6 +44,7 @@ import net.runelite.api.widgets.ComponentID;
 import net.runelite.api.widgets.Widget;
 import net.runelite.api.worldmap.WorldMap;
 import net.runelite.client.callback.ClientThread;
+import net.runelite.client.config.ConfigManager;
 import net.runelite.client.game.ChatIconManager;
 import net.runelite.client.game.WorldService;
 import net.runelite.client.ui.overlay.worldmap.WorldMapPointManager;
@@ -51,17 +58,53 @@ import okhttp3.Response;
 import okhttp3.WebSocket;
 import okhttp3.WebSocketListener;
 
+@Slf4j
 @Singleton
 public class ClanPositionService
 {
 	static final String BACKEND_URL = "https://lobsterpot-positions.lobsterpot.workers.dev";
 
 	private static final int TICKS_PER_UPDATE = 8;
+	// When standing still, resend at this interval so the position doesn't expire on the backend
+	// (server TTL is 60s). Movement/world/activity changes are sent as soon as they happen.
+	private static final long POSITION_HEARTBEAT_MS = 45_000L;
 	private static final int MAX_HOP_ATTEMPTS = 3;
 	private static final int MAX_POSITION_DISTANCE = 64_000;
 	private static final int MAX_ACTIVITY_LENGTH = 80;
 	private static final int MAP_MARKER_HOVER_PADDING = 6;
+	private static final int FINDER_BUTTON_SIZE = 28;
+	private static final int FINDER_MARGIN = 12;
+	private static final int FINDER_PANEL_GAP = 6;
+	private static final int FINDER_PANEL_PADDING = 6;
+	private static final int FINDER_HEADER_HEIGHT = 20;
+	private static final int FINDER_ROW_HEIGHT = 18;
+	private static final int FINDER_COLUMN_WIDTH = 142;
+	private static final Color FINDER_BACKGROUND = new Color(25, 25, 25, 225);
+	private static final Color FINDER_BUTTON_BACKGROUND = new Color(38, 38, 38, 230);
+	private static final Color FINDER_BUTTON_ACTIVE_BACKGROUND = new Color(69, 54, 22, 235);
+	private static final Color FINDER_HOVER_BACKGROUND = new Color(78, 78, 78, 210);
+	private static final Color FINDER_BORDER = new Color(94, 94, 94, 230);
+	private static final Color FINDER_TEXT = new Color(238, 238, 238);
+	private static final Color FINDER_MUTED_TEXT = new Color(174, 174, 174);
+	private static final Color FINDER_ACCENT = new Color(255, 184, 47);
 	private static final long SOCKET_RECONNECT_DELAY_MS = 10_000L;
+	// World map "map list" dropdown at the bottom of the world map (gameval component ids).
+	private static final int MAPLIST_LIST = net.runelite.api.gameval.InterfaceID.Worldmap.MAPLIST_LIST;
+	// Op index for a map list entry's "Select" action (action 0 -> op 1). The entries carry an
+	// onOp listener even while the dropdown is collapsed, so we can select a map without opening it.
+	private static final int MAPLIST_SELECT_OP = 1;
+	// The layer search runs on client ticks (~20ms) rather than game ticks (~600ms) so it is fast.
+	// Client ticks to wait for a selected map to finish loading before testing the next entry.
+	private static final int LAYER_FOCUS_MAX_WAIT_TICKS = 2;
+	// Hard cap (client ticks) on how long the whole layer search may run, as a safety net.
+	private static final int LAYER_FOCUS_MAX_TOTAL_TICKS = 800;
+	private static final String CONFIG_GROUP = "lobsterpot";
+	private static final String LAYER_CACHE_KEY = "worldMapLayerCache";
+	private static final Color LAYER_COVER_BACKGROUND = new Color(18, 18, 18, 236);
+	private static final int CONFIRM_WIDTH = 264;
+	private static final int CONFIRM_HEIGHT = 92;
+	private static final int CONFIRM_BUTTON_HEIGHT = 24;
+	private static final int CONFIRM_PADDING = 10;
 	private static final Map<Integer, String> ACTIVITY_BY_ANIMATION = buildActivityByAnimation();
 
 	@Inject
@@ -85,27 +128,70 @@ public class ClanPositionService
 	@Inject
 	private WorldService worldService;
 
+	@Inject
+	private ConfigManager configManager;
+
 	private volatile boolean active = false;
 	private volatile WebSocket positionSocket;
 	private volatile boolean socketConnecting = false;
 	private volatile String socketPlayerKey = "";
 	private long lastSocketAttemptAt = 0L;
 	private volatile boolean sharedPositionOnSocket = false;
+	// Last position actually sent, so we only resend when it changes (plus a periodic heartbeat).
+	private int lastSentX = Integer.MIN_VALUE;
+	private int lastSentY;
+	private int lastSentPlane;
+	private int lastSentWorld;
+	private String lastSentActivity = "";
+	private long lastSentAtMs;
 	private int tickCounter = 0;
 	private int displaySwitcherAttempts = 0;
 	private World quickHopTargetWorld;
+	private boolean finderExpanded = false;
 	private final Map<String, ClanMemberWorldMapPoint> trackedPoints = new HashMap<>();
+
+	// Layer focus: when a clanmate is on a map that isn't the currently displayed one, we walk
+	// the world map's bottom "map list" dropdown, load each entry, and stop on the one that
+	// contains the target. Null phase means no search is in progress.
+	private LayerFocusPhase layerFocusPhase;
+	private WorldPoint layerFocusTarget;
+	private String layerFocusMemberName;
+	private int layerFocusRegion;
+	private String layerFocusPreferredName;
+	private boolean layerFocusTriedPreferred;
+	private String layerFocusCurrentEntryName;
+	private int layerFocusIndex;
+	private int layerFocusEntryTotal;
+	private int layerFocusWaitTicks;
+	private int layerFocusTotalTicks;
+	private boolean layerFocusScanLogged;
+	// Confirmation prompt shown when a clicked clanmate isn't on the current map layer.
+	private WorldPoint pendingConfirmTarget;
+	private String pendingConfirmName;
+	// Persisted cache: world map region id -> map list entry name that contains it. Lets a
+	// previously resolved layer become a single clean switch instead of a full scan.
+	private final Map<Integer, String> layerMapNameByRegion = new HashMap<>();
+
+	private enum LayerFocusPhase
+	{
+		LOAD,
+		WAIT
+	}
 
 	public void start()
 	{
 		active = true;
 		tickCounter = 0;
 		sharedPositionOnSocket = false;
+		loadLayerCache();
 	}
 
 	public void stop()
 	{
 		active = false;
+		finderExpanded = false;
+		cancelLayerFocus();
+		clearConfirmPrompt();
 		disconnectPositionSocket();
 		resetQuickHopper();
 		clientThread.invokeLater(this::clearPoints);
@@ -158,7 +244,35 @@ public class ClanPositionService
 
 		final int world = client.getWorld();
 		final String activity = currentPlayerActivity(localPlayer, world);
-		sendPosition(rsn, wp, world, activity);
+		if (shouldSendPosition(wp, world, activity))
+		{
+			sendPosition(rsn, wp, world, activity);
+		}
+	}
+
+	// Only send when the position, world, or activity has changed since the last send, or when the
+	// heartbeat interval has elapsed. This avoids a steady stream of identical updates while idle.
+	private boolean shouldSendPosition(WorldPoint wp, int world, String activity)
+	{
+		if (!sharedPositionOnSocket
+			|| wp.getX() != lastSentX
+			|| wp.getY() != lastSentY
+			|| wp.getPlane() != lastSentPlane
+			|| world != lastSentWorld
+			|| !sameText(activity, lastSentActivity))
+		{
+			return true;
+		}
+		return System.currentTimeMillis() - lastSentAtMs >= POSITION_HEARTBEAT_MS;
+	}
+
+	// Driven from the client tick (not the game tick) so the layer scan is fast.
+	public void onClientTick()
+	{
+		if (active)
+		{
+			continueLayerFocus();
+		}
 	}
 
 	public void addHopMenuEntry(MenuEntryAdded event)
@@ -242,6 +356,21 @@ public class ClanPositionService
 			return;
 		}
 
+		final Point mouse = client.getMouseCanvasPosition();
+
+		// While the confirmation prompt or a scan is showing, only its buttons are interactive.
+		if (pendingConfirmTarget != null || layerFocusPhase != null)
+		{
+			addConfirmMenuEntries(mouse);
+			return;
+		}
+
+		if (isMouseOverFinder(mouse))
+		{
+			addFinderMenuEntries();
+			return;
+		}
+
 		final ClanMemberWorldMapPoint point = hoveredPoint();
 		if (point == null || point.getWorld() <= 0 || point.getWorld() == client.getWorld() || hasHopMenuEntry(point))
 		{
@@ -256,6 +385,171 @@ public class ClanPositionService
 			.onClick(entry -> hopTo(point));
 	}
 
+	public void renderMapFinder(Graphics2D graphics)
+	{
+		if (!active || graphics == null)
+		{
+			return;
+		}
+
+		final Rectangle mapBounds = worldMapViewBounds();
+		if (mapBounds == null)
+		{
+			finderExpanded = false;
+			return;
+		}
+
+		final List<ClanMemberWorldMapPoint> points = sortedFinderPoints();
+		final Rectangle buttonBounds = finderButtonBounds(mapBounds);
+		if (finderExpanded)
+		{
+			drawFinderPanel(graphics, mapBounds, points);
+		}
+		drawFinderButton(graphics, buttonBounds);
+	}
+
+	// Hides the rapid map switching during a layer search behind a simple loading cover so the
+	// user sees a brief "Locating..." panel instead of the world map flickering through layers.
+	public void renderLayerFocusCover(Graphics2D graphics)
+	{
+		if (!active || layerFocusPhase == null || graphics == null)
+		{
+			return;
+		}
+
+		final Rectangle bounds = worldMapViewBounds();
+		if (bounds == null)
+		{
+			return;
+		}
+
+		graphics.setColor(LAYER_COVER_BACKGROUND);
+		graphics.fillRect(bounds.x, bounds.y, bounds.width, bounds.height);
+
+		final FontMetrics metrics = graphics.getFontMetrics();
+		final String name = hasText(layerFocusMemberName) ? layerFocusMemberName : "clanmate";
+		final String title = "Locating " + name + "…";
+		graphics.setColor(FINDER_ACCENT);
+		graphics.drawString(title, bounds.x + (bounds.width - metrics.stringWidth(title)) / 2,
+			bounds.y + bounds.height / 2);
+
+		if (layerFocusScanLogged && layerFocusEntryTotal > 0)
+		{
+			final String progress = "Searching map layers (" + Math.min(layerFocusIndex, layerFocusEntryTotal)
+				+ "/" + layerFocusEntryTotal + ")";
+			graphics.setColor(FINDER_MUTED_TEXT);
+			graphics.drawString(progress, bounds.x + (bounds.width - metrics.stringWidth(progress)) / 2,
+				bounds.y + bounds.height / 2 + metrics.getHeight());
+		}
+	}
+
+	// Prompt shown when a clicked clanmate is on a different map layer, asking whether to scan.
+	public void renderConfirmPrompt(Graphics2D graphics)
+	{
+		if (!active || graphics == null || pendingConfirmTarget == null || layerFocusPhase != null)
+		{
+			return;
+		}
+
+		final Rectangle mapBounds = worldMapViewBounds();
+		if (mapBounds == null)
+		{
+			clearConfirmPrompt();
+			return;
+		}
+
+		final Rectangle panel = confirmPanelBounds(mapBounds);
+		graphics.setColor(FINDER_BACKGROUND);
+		graphics.fillRoundRect(panel.x, panel.y, panel.width, panel.height, 8, 8);
+		graphics.setColor(FINDER_BORDER);
+		graphics.drawRoundRect(panel.x, panel.y, panel.width, panel.height, 8, 8);
+
+		final FontMetrics metrics = graphics.getFontMetrics();
+		final String name = hasText(pendingConfirmName) ? pendingConfirmName : "Clanmate";
+		final String line1 = name + " isn't on this map layer.";
+		final String line2 = "Search the other map layers for them?";
+		graphics.setColor(FINDER_TEXT);
+		graphics.drawString(fitText(line1, metrics, panel.width - CONFIRM_PADDING * 2),
+			panel.x + CONFIRM_PADDING, panel.y + CONFIRM_PADDING + metrics.getAscent());
+		graphics.setColor(FINDER_MUTED_TEXT);
+		graphics.drawString(fitText(line2, metrics, panel.width - CONFIRM_PADDING * 2),
+			panel.x + CONFIRM_PADDING, panel.y + CONFIRM_PADDING + metrics.getHeight() + metrics.getAscent());
+
+		final Point mouse = client.getMouseCanvasPosition();
+		drawConfirmButton(graphics, confirmSearchBounds(panel), "Search", mouse, true);
+		drawConfirmButton(graphics, confirmCancelBounds(panel), "Cancel", mouse, false);
+	}
+
+	private void drawConfirmButton(Graphics2D graphics, Rectangle bounds, String label, Point mouse, boolean accent)
+	{
+		final boolean hovered = contains(bounds, mouse);
+		graphics.setColor(hovered ? FINDER_HOVER_BACKGROUND : FINDER_BUTTON_BACKGROUND);
+		graphics.fillRoundRect(bounds.x, bounds.y, bounds.width, bounds.height, 6, 6);
+		graphics.setColor(accent ? FINDER_ACCENT : FINDER_BORDER);
+		graphics.drawRoundRect(bounds.x, bounds.y, bounds.width, bounds.height, 6, 6);
+
+		final FontMetrics metrics = graphics.getFontMetrics();
+		graphics.setColor(accent ? FINDER_ACCENT : FINDER_TEXT);
+		graphics.drawString(label, bounds.x + (bounds.width - metrics.stringWidth(label)) / 2,
+			bounds.y + (bounds.height - metrics.getHeight()) / 2 + metrics.getAscent());
+	}
+
+	private void addConfirmMenuEntries(Point mouse)
+	{
+		if (pendingConfirmTarget == null || layerFocusPhase != null)
+		{
+			return;
+		}
+
+		final Rectangle mapBounds = worldMapViewBounds();
+		if (mapBounds == null)
+		{
+			return;
+		}
+
+		final Rectangle panel = confirmPanelBounds(mapBounds);
+		if (contains(confirmSearchBounds(panel), mouse))
+		{
+			client.createMenuEntry(-1)
+				.setOption("Search layers")
+				.setTarget(hasText(pendingConfirmName) ? pendingConfirmName : "")
+				.setType(MenuAction.RUNELITE)
+				.setForceLeftClick(true)
+				.onClick(entry -> confirmLayerSearch());
+		}
+		else if (contains(confirmCancelBounds(panel), mouse))
+		{
+			client.createMenuEntry(-1)
+				.setOption("Cancel")
+				.setTarget("")
+				.setType(MenuAction.RUNELITE)
+				.setForceLeftClick(true)
+				.onClick(entry -> clearConfirmPrompt());
+		}
+	}
+
+	private Rectangle confirmPanelBounds(Rectangle mapBounds)
+	{
+		final int width = Math.min(CONFIRM_WIDTH, mapBounds.width - 20);
+		final int x = mapBounds.x + (mapBounds.width - width) / 2;
+		final int y = mapBounds.y + (mapBounds.height - CONFIRM_HEIGHT) / 2;
+		return new Rectangle(x, y, width, CONFIRM_HEIGHT);
+	}
+
+	private static Rectangle confirmSearchBounds(Rectangle panel)
+	{
+		final int width = (panel.width - CONFIRM_PADDING * 3) / 2;
+		return new Rectangle(panel.x + CONFIRM_PADDING,
+			panel.y + panel.height - CONFIRM_BUTTON_HEIGHT - CONFIRM_PADDING, width, CONFIRM_BUTTON_HEIGHT);
+	}
+
+	private static Rectangle confirmCancelBounds(Rectangle panel)
+	{
+		final int width = (panel.width - CONFIRM_PADDING * 3) / 2;
+		return new Rectangle(panel.x + panel.width - CONFIRM_PADDING - width,
+			panel.y + panel.height - CONFIRM_BUTTON_HEIGHT - CONFIRM_PADDING, width, CONFIRM_BUTTON_HEIGHT);
+	}
+
 	public void clearPoints()
 	{
 		for (ClanMemberWorldMapPoint point : trackedPoints.values())
@@ -263,6 +557,596 @@ public class ClanPositionService
 			worldMapPointManager.remove(point);
 		}
 		trackedPoints.clear();
+		finderExpanded = false;
+		clearConfirmPrompt();
+		cancelLayerFocus();
+	}
+
+	private void addFinderMenuEntries(Rectangle mapBounds, Rectangle buttonBounds, List<ClanMemberWorldMapPoint> points)
+	{
+		if (client.isMenuOpen())
+		{
+			return;
+		}
+
+		final Point mouse = client.getMouseCanvasPosition();
+		if (mouse == null)
+		{
+			return;
+		}
+
+		if (contains(buttonBounds, mouse))
+		{
+			client.createMenuEntry(-1)
+				.setOption(finderExpanded ? "Close" : "Open")
+				.setTarget("clan map list")
+				.setType(MenuAction.RUNELITE)
+				.setForceLeftClick(true)
+				.onClick(entry -> finderExpanded = !finderExpanded);
+			return;
+		}
+
+		if (!finderExpanded || points.isEmpty())
+		{
+			return;
+		}
+
+		final FinderLayout layout = finderLayout(mapBounds, points.size());
+		final ClanMemberWorldMapPoint point = finderPointAt(mouse, layout, points);
+		if (point == null)
+		{
+			return;
+		}
+
+		client.createMenuEntry(-1)
+			.setOption("Focus")
+			.setTarget(point.getMemberName())
+			.setType(MenuAction.RUNELITE)
+			.setForceLeftClick(true)
+			.onClick(entry -> focusMapOn(point));
+	}
+
+	private void addFinderMenuEntries()
+	{
+		final Rectangle mapBounds = worldMapViewBounds();
+		if (mapBounds == null)
+		{
+			return;
+		}
+
+		addFinderMenuEntries(mapBounds, finderButtonBounds(mapBounds), sortedFinderPoints());
+	}
+
+	private void drawFinderButton(Graphics2D graphics, Rectangle bounds)
+	{
+		graphics.setColor(finderExpanded ? FINDER_BUTTON_ACTIVE_BACKGROUND : FINDER_BUTTON_BACKGROUND);
+		graphics.fillRoundRect(bounds.x, bounds.y, bounds.width, bounds.height, 6, 6);
+		graphics.setColor(finderExpanded ? FINDER_ACCENT : FINDER_BORDER);
+		graphics.setStroke(new BasicStroke(1f));
+		graphics.drawRoundRect(bounds.x, bounds.y, bounds.width, bounds.height, 6, 6);
+
+		final int lineX = bounds.x + 8;
+		final int lineWidth = bounds.width - 16;
+		graphics.setColor(FINDER_TEXT);
+		for (int i = 0; i < 3; i++)
+		{
+			final int y = bounds.y + 9 + i * 5;
+			graphics.drawLine(lineX, y, lineX + lineWidth, y);
+		}
+	}
+
+	private void drawFinderPanel(Graphics2D graphics, Rectangle mapBounds, List<ClanMemberWorldMapPoint> points)
+	{
+		final FinderLayout layout = finderLayout(mapBounds, Math.max(1, points.size()));
+		final Rectangle panel = layout.panelBounds;
+		final Point mouse = client.getMouseCanvasPosition();
+
+		graphics.setColor(FINDER_BACKGROUND);
+		graphics.fillRoundRect(panel.x, panel.y, panel.width, panel.height, 6, 6);
+		graphics.setColor(FINDER_BORDER);
+		graphics.drawRoundRect(panel.x, panel.y, panel.width, panel.height, 6, 6);
+
+		final FontMetrics metrics = graphics.getFontMetrics();
+		final String title = "Clanmates (" + points.size() + ")";
+		final int titleY = panel.y + FINDER_PANEL_PADDING + (FINDER_HEADER_HEIGHT - metrics.getHeight()) / 2 + metrics.getAscent();
+		graphics.setColor(FINDER_ACCENT);
+		graphics.drawString(fitText(title, metrics, panel.width - FINDER_PANEL_PADDING * 2), panel.x + FINDER_PANEL_PADDING, titleY);
+		graphics.setColor(FINDER_BORDER);
+		graphics.drawLine(panel.x + FINDER_PANEL_PADDING, panel.y + FINDER_PANEL_PADDING + FINDER_HEADER_HEIGHT - 1,
+			panel.x + panel.width - FINDER_PANEL_PADDING, panel.y + FINDER_PANEL_PADDING + FINDER_HEADER_HEIGHT - 1);
+
+		if (points.isEmpty())
+		{
+			final Rectangle row = finderRowBounds(layout, 0);
+			drawFinderText(graphics, "No clanmates", "", row, false);
+			return;
+		}
+
+		for (int i = 0; i < points.size(); i++)
+		{
+			final ClanMemberWorldMapPoint point = points.get(i);
+			final Rectangle row = finderRowBounds(layout, i);
+			final boolean hovered = mouse != null && contains(row, mouse);
+			drawFinderText(graphics, point.getMemberName(), finderLocationSuffix(point), row, hovered);
+		}
+	}
+
+	private void drawFinderText(Graphics2D graphics, String name, String worldText, Rectangle row, boolean hovered)
+	{
+		if (hovered)
+		{
+			graphics.setColor(FINDER_HOVER_BACKGROUND);
+			graphics.fillRect(row.x, row.y, row.width, row.height);
+		}
+
+		final FontMetrics metrics = graphics.getFontMetrics();
+		final int textY = row.y + (row.height - metrics.getHeight()) / 2 + metrics.getAscent();
+		final int worldWidth = hasText(worldText) ? metrics.stringWidth(worldText) + 8 : 0;
+		graphics.setColor(FINDER_TEXT);
+		graphics.drawString(fitText(name, metrics, row.width - worldWidth - 6), row.x + 4, textY);
+		if (hasText(worldText))
+		{
+			graphics.setColor(FINDER_MUTED_TEXT);
+			graphics.drawString(worldText, row.x + row.width - metrics.stringWidth(worldText) - 4, textY);
+		}
+	}
+
+	private String finderLocationSuffix(ClanMemberWorldMapPoint point)
+	{
+		final StringBuilder suffix = new StringBuilder();
+		if (point.getWorld() > 0)
+		{
+			suffix.append("W").append(point.getWorld());
+		}
+
+		final WorldPoint worldPoint = point.getWorldPoint();
+		if (worldPoint != null && worldPoint.getPlane() > 0)
+		{
+			if (suffix.length() > 0)
+			{
+				suffix.append(" ");
+			}
+			suffix.append("P").append(worldPoint.getPlane());
+		}
+		return suffix.toString();
+	}
+
+	private void focusMapOn(ClanMemberWorldMapPoint point)
+	{
+		if (point == null || point.getWorldPoint() == null)
+		{
+			return;
+		}
+
+		final WorldPoint target = point.getWorldPoint();
+		final String memberName = point.getMemberName();
+		clientThread.invoke(() ->
+		{
+			final WorldMap worldMap = client.getWorldMap();
+			if (worldMap == null)
+			{
+				return;
+			}
+
+			if (currentMapContains(worldMap, target))
+			{
+				clearConfirmPrompt();
+				cancelLayerFocus();
+				worldMap.setWorldMapPositionTarget(target);
+				return;
+			}
+
+			cancelLayerFocus();
+
+			// A previously resolved layer is a single clean switch, so go straight there. Only
+			// ask for confirmation when the target's layer is unknown and a full scan is needed.
+			if (layerMapNameByRegion.containsKey(target.getRegionID()))
+			{
+				clearConfirmPrompt();
+				beginLayerFocus(target, memberName);
+				return;
+			}
+
+			pendingConfirmTarget = target;
+			pendingConfirmName = memberName;
+		});
+	}
+
+	private void confirmLayerSearch()
+	{
+		final WorldPoint target = pendingConfirmTarget;
+		final String memberName = pendingConfirmName;
+		clearConfirmPrompt();
+		if (target != null)
+		{
+			beginLayerFocus(target, memberName);
+		}
+	}
+
+	private void clearConfirmPrompt()
+	{
+		pendingConfirmTarget = null;
+		pendingConfirmName = null;
+	}
+
+	private void beginLayerFocus(WorldPoint target, String memberName)
+	{
+		layerFocusPhase = LayerFocusPhase.LOAD;
+		layerFocusTarget = target;
+		layerFocusMemberName = memberName;
+		layerFocusRegion = target.getRegionID();
+		layerFocusPreferredName = layerMapNameByRegion.get(layerFocusRegion);
+		layerFocusTriedPreferred = false;
+		layerFocusCurrentEntryName = null;
+		layerFocusIndex = 0;
+		layerFocusEntryTotal = 0;
+		layerFocusWaitTicks = 0;
+		layerFocusTotalTicks = 0;
+		layerFocusScanLogged = false;
+	}
+
+	private void cancelLayerFocus()
+	{
+		layerFocusPhase = null;
+		layerFocusTarget = null;
+		layerFocusMemberName = null;
+	}
+
+	// Runs each game tick while a layer search is in progress. Opens the world map "map list"
+	// dropdown, loads each entry in turn, and focuses the target once its map is displayed.
+	private void continueLayerFocus()
+	{
+		if (layerFocusPhase == null)
+		{
+			return;
+		}
+
+		if (++layerFocusTotalTicks > LAYER_FOCUS_MAX_TOTAL_TICKS)
+		{
+			log.debug("[LobsterPot] layer focus timed out for {}", layerFocusMemberName);
+			abortLayerFocus();
+			return;
+		}
+
+		final WorldMap worldMap = client.getWorldMap();
+		if (worldMap == null || worldMapViewBounds() == null)
+		{
+			// World map was closed; give up silently.
+			cancelLayerFocus();
+			return;
+		}
+
+		// Whatever map is loaded now, if it contains the target we are done.
+		if (currentMapContains(worldMap, layerFocusTarget))
+		{
+			worldMap.setWorldMapPositionTarget(layerFocusTarget);
+			rememberLayer(layerFocusRegion, layerFocusCurrentEntryName);
+			log.debug("[LobsterPot] focused {} on map layer '{}'", layerFocusMemberName, layerFocusCurrentEntryName);
+			cancelLayerFocus();
+			return;
+		}
+
+		if (layerFocusPhase == LayerFocusPhase.WAIT)
+		{
+			if (++layerFocusWaitTicks >= LAYER_FOCUS_MAX_WAIT_TICKS)
+			{
+				layerFocusPhase = LayerFocusPhase.LOAD;
+			}
+			return;
+		}
+
+		loadNextLayerEntry();
+	}
+
+	private void loadNextLayerEntry()
+	{
+		// The map list entries live under MAPLIST_LIST and keep their "Select" onOp listeners even
+		// while the dropdown is collapsed, so we can load each map without opening the dropdown.
+		final Widget list = client.getWidget(MAPLIST_LIST);
+		final Widget[] entries = list == null ? new Widget[0] : mapListEntries(list);
+		if (entries.length == 0)
+		{
+			// List not available yet; keep waiting (bounded by the total tick budget).
+			return;
+		}
+		layerFocusEntryTotal = entries.length;
+
+		// Try the cached map for this region first, so a known layer is a single clean switch.
+		if (hasText(layerFocusPreferredName) && !layerFocusTriedPreferred)
+		{
+			layerFocusTriedPreferred = true;
+			final Widget preferred = findEntryByName(entries, layerFocusPreferredName);
+			if (preferred != null)
+			{
+				layerFocusCurrentEntryName = layerFocusPreferredName;
+				layerFocusWaitTicks = 0;
+				if (invokeWidgetOp(preferred))
+				{
+					layerFocusPhase = LayerFocusPhase.WAIT;
+					return;
+				}
+			}
+		}
+
+		if (!layerFocusScanLogged)
+		{
+			log.debug("[LobsterPot] scanning {} world map layers for {}", entries.length, layerFocusMemberName);
+			layerFocusScanLogged = true;
+		}
+
+		if (layerFocusIndex >= entries.length)
+		{
+			log.debug("[LobsterPot] no world map layer contained {}", layerFocusMemberName);
+			abortLayerFocus();
+			return;
+		}
+
+		final Widget entry = entries[layerFocusIndex];
+		layerFocusIndex++;
+		layerFocusCurrentEntryName = entry.getText();
+		layerFocusWaitTicks = 0;
+		if (invokeWidgetOp(entry))
+		{
+			layerFocusPhase = LayerFocusPhase.WAIT;
+		}
+	}
+
+	private static Widget findEntryByName(Widget[] entries, String name)
+	{
+		for (Widget entry : entries)
+		{
+			if (entry != null && name.equals(entry.getText()))
+			{
+				return entry;
+			}
+		}
+		return null;
+	}
+
+	private void rememberLayer(int region, String entryName)
+	{
+		if (!hasText(entryName) || entryName.equals(layerMapNameByRegion.get(region)))
+		{
+			return;
+		}
+		layerMapNameByRegion.put(region, entryName);
+		saveLayerCache();
+	}
+
+	private void loadLayerCache()
+	{
+		layerMapNameByRegion.clear();
+		final String json = configManager.getConfiguration(CONFIG_GROUP, LAYER_CACHE_KEY);
+		if (!hasText(json))
+		{
+			return;
+		}
+
+		try
+		{
+			final Map<String, String> stored = gson.fromJson(json,
+				new com.google.gson.reflect.TypeToken<Map<String, String>>() {}.getType());
+			if (stored == null)
+			{
+				return;
+			}
+			for (Map.Entry<String, String> entry : stored.entrySet())
+			{
+				if (!hasText(entry.getValue()))
+				{
+					continue;
+				}
+				try
+				{
+					layerMapNameByRegion.put(Integer.parseInt(entry.getKey()), entry.getValue());
+				}
+				catch (NumberFormatException ignored)
+				{
+					// Skip malformed keys.
+				}
+			}
+		}
+		catch (Exception ex)
+		{
+			log.debug("[LobsterPot] could not load world map layer cache", ex);
+		}
+	}
+
+	private void saveLayerCache()
+	{
+		final Map<String, String> stored = new HashMap<>();
+		for (Map.Entry<Integer, String> entry : layerMapNameByRegion.entrySet())
+		{
+			stored.put(String.valueOf(entry.getKey()), entry.getValue());
+		}
+		configManager.setConfiguration(CONFIG_GROUP, LAYER_CACHE_KEY, gson.toJson(stored));
+	}
+
+	private void abortLayerFocus()
+	{
+		final String memberName = layerFocusMemberName;
+		cancelLayerFocus();
+		if (hasText(memberName))
+		{
+			client.addChatMessage(ChatMessageType.CONSOLE, "", memberName
+				+ " is on a world map layer that could not be focused automatically."
+				+ " Use the map list at the bottom of the world map.", null);
+		}
+	}
+
+	private boolean invokeWidgetOp(Widget widget)
+	{
+		if (widget == null)
+		{
+			return false;
+		}
+
+		final Object[] listener = widget.getOnOpListener();
+		if (listener == null)
+		{
+			log.debug("[LobsterPot] widget {} has no onOp listener", Integer.toHexString(widget.getId()));
+			return false;
+		}
+
+		client.createScriptEventBuilder(listener)
+			.setSource(widget)
+			.setOp(MAPLIST_SELECT_OP)
+			.build()
+			.run();
+		return true;
+	}
+
+	// The map list entries are the dynamic children of MAPLIST_LIST that carry a "Select" onOp
+	// listener (one per selectable map). Filtering on the listener skips any non-entry children.
+	private static Widget[] mapListEntries(Widget list)
+	{
+		final Widget[] children = list.getDynamicChildren();
+		if (children == null)
+		{
+			return new Widget[0];
+		}
+
+		final List<Widget> entries = new ArrayList<>(children.length);
+		for (Widget child : children)
+		{
+			if (child != null && child.getOnOpListener() != null)
+			{
+				entries.add(child);
+			}
+		}
+		return entries.toArray(new Widget[0]);
+	}
+
+	private static boolean currentMapContains(WorldMap worldMap, WorldPoint target)
+	{
+		return worldMap.getWorldMapData() != null
+			&& worldMap.getWorldMapData().surfaceContainsPosition(target.getX(), target.getY());
+	}
+
+	private boolean isMouseOverFinder(Point mouse)
+	{
+		if (mouse == null)
+		{
+			return false;
+		}
+
+		final Rectangle mapBounds = worldMapViewBounds();
+		if (mapBounds == null)
+		{
+			return false;
+		}
+
+		if (contains(finderButtonBounds(mapBounds), mouse))
+		{
+			return true;
+		}
+
+		if (!finderExpanded)
+		{
+			return false;
+		}
+
+		return contains(finderLayout(mapBounds, Math.max(1, trackedPoints.size())).panelBounds, mouse);
+	}
+
+	private ClanMemberWorldMapPoint finderPointAt(Point mouse, FinderLayout layout, List<ClanMemberWorldMapPoint> points)
+	{
+		for (int i = 0; i < points.size(); i++)
+		{
+			if (contains(finderRowBounds(layout, i), mouse))
+			{
+				return points.get(i);
+			}
+		}
+		return null;
+	}
+
+	private FinderLayout finderLayout(Rectangle mapBounds, int itemCount)
+	{
+		final Rectangle button = finderButtonBounds(mapBounds);
+		final int maxPanelHeight = Math.max(FINDER_HEADER_HEIGHT + FINDER_ROW_HEIGHT + FINDER_PANEL_PADDING * 2,
+			button.y - FINDER_PANEL_GAP - mapBounds.y - FINDER_MARGIN);
+		final int maxRows = Math.max(1, (maxPanelHeight - FINDER_HEADER_HEIGHT - FINDER_PANEL_PADDING * 2) / FINDER_ROW_HEIGHT);
+		final int rowsPerColumn = Math.max(1, Math.min(Math.max(1, itemCount), maxRows));
+		final int columns = Math.max(1, (int) Math.ceil((double) Math.max(1, itemCount) / rowsPerColumn));
+		final int maxPanelWidth = Math.max(FINDER_COLUMN_WIDTH, mapBounds.width - FINDER_MARGIN * 2);
+		final int rowWidth = Math.max(92, Math.min(FINDER_COLUMN_WIDTH, (maxPanelWidth - FINDER_PANEL_PADDING * 2) / columns));
+		final int panelWidth = FINDER_PANEL_PADDING * 2 + rowWidth * columns;
+		final int panelHeight = FINDER_PANEL_PADDING * 2 + FINDER_HEADER_HEIGHT + rowsPerColumn * FINDER_ROW_HEIGHT;
+		final int x = Math.max(mapBounds.x + FINDER_MARGIN, button.x + button.width - panelWidth);
+		final int y = Math.max(mapBounds.y + FINDER_MARGIN, button.y - FINDER_PANEL_GAP - panelHeight);
+		return new FinderLayout(new Rectangle(x, y, panelWidth, panelHeight), rowsPerColumn, rowWidth);
+	}
+
+	private Rectangle finderButtonBounds(Rectangle mapBounds)
+	{
+		return new Rectangle(
+			mapBounds.x + mapBounds.width - FINDER_MARGIN - FINDER_BUTTON_SIZE,
+			mapBounds.y + mapBounds.height - FINDER_MARGIN - FINDER_BUTTON_SIZE,
+			FINDER_BUTTON_SIZE,
+			FINDER_BUTTON_SIZE);
+	}
+
+	private Rectangle finderRowBounds(FinderLayout layout, int index)
+	{
+		final int column = index / layout.rowsPerColumn;
+		final int row = index % layout.rowsPerColumn;
+		return new Rectangle(
+			layout.panelBounds.x + FINDER_PANEL_PADDING + column * layout.rowWidth,
+			layout.panelBounds.y + FINDER_PANEL_PADDING + FINDER_HEADER_HEIGHT + row * FINDER_ROW_HEIGHT,
+			layout.rowWidth,
+			FINDER_ROW_HEIGHT);
+	}
+
+	private Rectangle worldMapViewBounds()
+	{
+		final Widget map = client.getWidget(ComponentID.WORLD_MAP_MAPVIEW);
+		if (map == null || map.isHidden() || map.getBounds() == null)
+		{
+			return null;
+		}
+		return map.getBounds();
+	}
+
+	private List<ClanMemberWorldMapPoint> sortedFinderPoints()
+	{
+		final List<ClanMemberWorldMapPoint> points = new ArrayList<>(trackedPoints.values());
+		points.sort(Comparator.comparing(ClanMemberWorldMapPoint::getMemberName, String.CASE_INSENSITIVE_ORDER));
+		return points;
+	}
+
+	private static boolean contains(Rectangle rectangle, Point point)
+	{
+		return rectangle != null && point != null && rectangle.contains(point.getX(), point.getY());
+	}
+
+	private static String fitText(String text, FontMetrics metrics, int maxWidth)
+	{
+		if (text == null || maxWidth <= 0)
+		{
+			return "";
+		}
+		if (metrics.stringWidth(text) <= maxWidth)
+		{
+			return text;
+		}
+
+		final String suffix = "...";
+		final int suffixWidth = metrics.stringWidth(suffix);
+		if (suffixWidth >= maxWidth)
+		{
+			return "";
+		}
+
+		for (int i = text.length() - 1; i > 0; i--)
+		{
+			final String candidate = text.substring(0, i) + suffix;
+			if (metrics.stringWidth(candidate) <= maxWidth)
+			{
+				return candidate;
+			}
+		}
+		return "";
 	}
 
 	private void ensurePositionSocket(String rsn)
@@ -350,6 +1234,12 @@ public class ClanPositionService
 		if (socket.send(json))
 		{
 			sharedPositionOnSocket = true;
+			lastSentX = wp.getX();
+			lastSentY = wp.getY();
+			lastSentPlane = wp.getPlane();
+			lastSentWorld = world;
+			lastSentActivity = activity == null ? "" : activity;
+			lastSentAtMs = System.currentTimeMillis();
 			return;
 		}
 
@@ -374,12 +1264,17 @@ public class ClanPositionService
 	private void disconnectPositionSocket()
 	{
 		final WebSocket socket = positionSocket;
+		final boolean shouldClearPosition = sharedPositionOnSocket;
 		positionSocket = null;
 		socketConnecting = false;
 		socketPlayerKey = "";
 		sharedPositionOnSocket = false;
 		if (socket != null)
 		{
+			if (shouldClearPosition)
+			{
+				socket.send("{\"type\":\"clear\"}");
+			}
 			socket.close(1000, "Plugin stopped");
 		}
 	}
@@ -836,6 +1731,20 @@ public class ClanPositionService
 			&& left.getParam0() == right.getParam0()
 			&& left.getParam1() == right.getParam1()
 			&& left.getType() == right.getType();
+	}
+
+	private static class FinderLayout
+	{
+		private final Rectangle panelBounds;
+		private final int rowsPerColumn;
+		private final int rowWidth;
+
+		private FinderLayout(Rectangle panelBounds, int rowsPerColumn, int rowWidth)
+		{
+			this.panelBounds = panelBounds;
+			this.rowsPerColumn = rowsPerColumn;
+			this.rowWidth = rowWidth;
+		}
 	}
 
 	private static Map<Integer, String> buildActivityByAnimation()

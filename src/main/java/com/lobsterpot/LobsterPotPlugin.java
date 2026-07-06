@@ -22,6 +22,7 @@ import net.runelite.api.ChatMessageType;
 import net.runelite.api.Client;
 import net.runelite.api.GameState;
 import net.runelite.api.events.ClanChannelChanged;
+import net.runelite.api.events.ClientTick;
 import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.GameTick;
 import net.runelite.api.events.MenuEntryAdded;
@@ -139,6 +140,12 @@ public class LobsterPotPlugin extends Plugin
 	public void onGameTick(GameTick event)
 	{
 		clanPositionService.onTick(currentAccess, config.shareWorldMapLocation());
+	}
+
+	@Subscribe
+	public void onClientTick(ClientTick event)
+	{
+		clanPositionService.onClientTick();
 	}
 
 	@Subscribe
@@ -276,13 +283,11 @@ public class LobsterPotPlugin extends Plugin
 
 			final ClanAccess access = currentAccess;
 			final PluginFeed feed = currentFeed;
-			if (access == null || feed == null)
+			// Only announce once access is confirmed allowed and the feed has loaded. Until then,
+			// leave the announcement pending so a later refresh (e.g. when the clan channel loads
+			// after login) can fire it, rather than cancelling it prematurely.
+			if (access == null || !access.isAllowed() || feed == null)
 			{
-				return;
-			}
-			if (!access.isAllowed())
-			{
-				announceBroadcastAfterFeedLoad = false;
 				return;
 			}
 

@@ -10,7 +10,7 @@ const MAX_COORDINATE = 64000;
 const MAX_ACTIVITY_LENGTH = 80;
 const MEMBER_FEED_URL = 'https://raw.githubusercontent.com/datlalo/lobsterpot-plugin-feed/refs/heads/main/plugin-feed.json';
 const MEMBER_CACHE_MS = 60000;
-const POSITION_TTL_MS = 20000;
+const POSITION_TTL_MS = 60000;
 const MIN_POSITION_UPDATE_MS = 4000;
 const BROADCAST_INTERVAL_MS = 5000;
 
@@ -95,12 +95,12 @@ export class ClanPositionRoom extends DurableObject {
 			memberKeys = await clanMemberKeys();
 		} catch {
 			socket.close(1011, 'Member feed unavailable');
-			this.removeSession(socket);
+			this.removeSession(socket, true);
 			return;
 		}
 		if (!memberKeys.has(session.key)) {
 			socket.close(1008, 'Forbidden');
-			this.removeSession(socket);
+			this.removeSession(socket, true);
 			return;
 		}
 
@@ -109,7 +109,7 @@ export class ClanPositionRoom extends DurableObject {
 			data = JSON.parse(message);
 		} catch {
 			socket.close(1003, 'Bad JSON');
-			this.removeSession(socket);
+			this.removeSession(socket, true);
 			return;
 		}
 
@@ -125,7 +125,7 @@ export class ClanPositionRoom extends DurableObject {
 		}
 		if (!isValidPosition(data) || memberKey(data.rsn) !== session.key) {
 			socket.close(1008, 'Invalid position');
-			this.removeSession(socket);
+			this.removeSession(socket, true);
 			return;
 		}
 
@@ -149,17 +149,19 @@ export class ClanPositionRoom extends DurableObject {
 	}
 
 	async webSocketClose(socket) {
-		this.removeSession(socket);
+		this.removeSession(socket, false);
 		this.queueBroadcast();
 	}
 
 	async webSocketError(socket) {
-		this.removeSession(socket);
+		this.removeSession(socket, false);
 		this.queueBroadcast();
 	}
 
-	removeSession(socket) {
-		this.removeSessionPosition(socket);
+	removeSession(socket, clearPosition) {
+		if (clearPosition) {
+			this.removeSessionPosition(socket);
+		}
 		this.sessions.delete(socket);
 	}
 
@@ -213,7 +215,7 @@ export class ClanPositionRoom extends DurableObject {
 		for (const [socket, session] of this.sessions) {
 			if (!keys.has(session.key)) {
 				socket.close(1008, 'Forbidden');
-				this.removeSession(socket);
+				this.removeSession(socket, true);
 				continue;
 			}
 			this.sendPositions(socket, keys);
