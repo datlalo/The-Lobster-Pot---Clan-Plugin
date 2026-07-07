@@ -67,7 +67,7 @@ public class ClanPositionService
 	private static final int TICKS_PER_UPDATE = 8;
 	// When standing still, resend at this interval so the position doesn't expire on the backend
 	// (server TTL is 60s). Movement/world/activity changes are sent as soon as they happen.
-	private static final long POSITION_HEARTBEAT_MS = 45_000L;
+	private static final long POSITION_HEARTBEAT_MS = 25_000L;
 	private static final int MAX_HOP_ATTEMPTS = 3;
 	private static final int MAX_POSITION_DISTANCE = 64_000;
 	private static final int MAX_ACTIVITY_LENGTH = 80;
