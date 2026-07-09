@@ -28,7 +28,6 @@ public class ClanPositionWorldMapOverlay extends Overlay
 	public Dimension render(Graphics2D graphics)
 	{
 		clanPositionService.renderMapFinder(graphics);
-		clanPositionService.renderConfirmPrompt(graphics);
 		clanPositionService.renderHopConfirmPrompt(graphics);
 		clanPositionService.renderLayerFocusCover(graphics);
 		clanPositionService.addHoveredMapMenuEntry();

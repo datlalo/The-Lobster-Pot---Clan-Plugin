@@ -165,9 +165,6 @@ public class ClanPositionService
 	private int layerFocusWaitTicks;
 	private int layerFocusTotalTicks;
 	private boolean layerFocusScanLogged;
-	// Confirmation prompt shown when a clicked clanmate isn't on the current map layer.
-	private WorldPoint pendingConfirmTarget;
-	private String pendingConfirmName;
 	// Confirmation prompt shown before a world hop, so an accidental marker click doesn't hop.
 	private ClanMemberWorldMapPoint pendingHopPoint;
 	// Persisted cache: world map region id -> map list entry name that contains it. Lets a
@@ -193,7 +190,6 @@ public class ClanPositionService
 		active = false;
 		finderExpanded = false;
 		cancelLayerFocus();
-		clearConfirmPrompt();
 		clearHopPrompt();
 		disconnectPositionSocket();
 		resetQuickHopper();
@@ -361,15 +357,15 @@ public class ClanPositionService
 
 		final Point mouse = client.getMouseCanvasPosition();
 
-		// While a confirmation prompt or a scan is showing, only its buttons are interactive.
+		// While the hop confirmation is showing only its buttons are interactive, and while a layer
+		// scan is running the map isn't clickable at all.
 		if (pendingHopPoint != null)
 		{
 			addHopConfirmMenuEntries(mouse);
 			return;
 		}
-		if (pendingConfirmTarget != null || layerFocusPhase != null)
+		if (layerFocusPhase != null)
 		{
-			addConfirmMenuEntries(mouse);
 			return;
 		}
 
@@ -449,26 +445,6 @@ public class ClanPositionService
 			graphics.drawString(progress, bounds.x + (bounds.width - metrics.stringWidth(progress)) / 2,
 				bounds.y + bounds.height / 2 + metrics.getHeight());
 		}
-	}
-
-	// Prompt shown when a clicked clanmate is on a different map layer, asking whether to scan.
-	public void renderConfirmPrompt(Graphics2D graphics)
-	{
-		if (!active || graphics == null || pendingConfirmTarget == null || layerFocusPhase != null)
-		{
-			return;
-		}
-
-		final Rectangle mapBounds = worldMapViewBounds();
-		if (mapBounds == null)
-		{
-			clearConfirmPrompt();
-			return;
-		}
-
-		final String name = hasText(pendingConfirmName) ? pendingConfirmName : "Clanmate";
-		drawConfirmPanel(graphics, confirmPanelBounds(mapBounds),
-			name + " isn't on this map layer.", "Search the other map layers for them?", "Search");
 	}
 
 	// Prompt shown before hopping worlds, so an accidental marker click can't world-hop you.
@@ -561,40 +537,6 @@ public class ClanPositionService
 		}
 	}
 
-	private void addConfirmMenuEntries(Point mouse)
-	{
-		if (pendingConfirmTarget == null || layerFocusPhase != null)
-		{
-			return;
-		}
-
-		final Rectangle mapBounds = worldMapViewBounds();
-		if (mapBounds == null)
-		{
-			return;
-		}
-
-		final Rectangle panel = confirmPanelBounds(mapBounds);
-		if (contains(confirmSearchBounds(panel), mouse))
-		{
-			client.createMenuEntry(-1)
-				.setOption("Search layers")
-				.setTarget(hasText(pendingConfirmName) ? pendingConfirmName : "")
-				.setType(MenuAction.RUNELITE)
-				.setForceLeftClick(true)
-				.onClick(entry -> confirmLayerSearch());
-		}
-		else if (contains(confirmCancelBounds(panel), mouse))
-		{
-			client.createMenuEntry(-1)
-				.setOption("Cancel")
-				.setTarget("")
-				.setType(MenuAction.RUNELITE)
-				.setForceLeftClick(true)
-				.onClick(entry -> clearConfirmPrompt());
-		}
-	}
-
 	private Rectangle confirmPanelBounds(Rectangle mapBounds)
 	{
 		final int width = Math.min(CONFIRM_WIDTH, mapBounds.width - 20);
@@ -625,7 +567,6 @@ public class ClanPositionService
 		}
 		trackedPoints.clear();
 		finderExpanded = false;
-		clearConfirmPrompt();
 		clearHopPrompt();
 		cancelLayerFocus();
 	}
@@ -798,45 +739,16 @@ public class ClanPositionService
 
 			if (currentMapContains(worldMap, target))
 			{
-				clearConfirmPrompt();
 				cancelLayerFocus();
 				worldMap.setWorldMapPositionTarget(target);
 				return;
 			}
 
+			// The layer is resolved from the region cache or the nearest-center table, so this is a
+			// single clean switch; if the guess is wrong beginLayerFocus falls back to a full scan.
 			cancelLayerFocus();
-
-			// A cached layer, or the nearest-center table lookup, resolves to a single clean switch,
-			// so go straight there. Only fall back to the confirm-then-scan prompt when neither can
-			// predict a layer for the target at all.
-			if (layerMapNameByRegion.containsKey(target.getRegionID())
-				|| hasText(WorldMapLayers.nearestLayerName(target.getX(), target.getY())))
-			{
-				clearConfirmPrompt();
-				beginLayerFocus(target, memberName);
-				return;
-			}
-
-			pendingConfirmTarget = target;
-			pendingConfirmName = memberName;
-		});
-	}
-
-	private void confirmLayerSearch()
-	{
-		final WorldPoint target = pendingConfirmTarget;
-		final String memberName = pendingConfirmName;
-		clearConfirmPrompt();
-		if (target != null)
-		{
 			beginLayerFocus(target, memberName);
-		}
-	}
-
-	private void clearConfirmPrompt()
-	{
-		pendingConfirmTarget = null;
-		pendingConfirmName = null;
+		});
 	}
 
 	private void beginLayerFocus(WorldPoint target, String memberName)
@@ -1674,32 +1586,6 @@ public class ClanPositionService
 		return false;
 	}
 
-	private void removeMenuEntry(MenuEntry menuEntry)
-	{
-		final MenuEntry[] entries = client.getMenuEntries();
-		if (menuEntry == null || entries == null || entries.length == 0)
-		{
-			return;
-		}
-
-		final List<MenuEntry> keptEntries = new ArrayList<>(entries.length);
-		boolean removed = false;
-		for (MenuEntry entry : entries)
-		{
-			if (!removed && sameMenuEntry(entry, menuEntry))
-			{
-				removed = true;
-				continue;
-			}
-			keptEntries.add(entry);
-		}
-
-		if (removed)
-		{
-			client.setMenuEntries(keptEntries.toArray(new MenuEntry[0]));
-		}
-	}
-
 	private World worldById(int worldId)
 	{
 		final World[] worlds = client.getWorldList();
@@ -1742,16 +1628,6 @@ public class ClanPositionService
 		world.setPlayerCount(playerCount);
 		world.setTypes(types == null ? EnumSet.noneOf(WorldType.class) : types);
 		return world;
-	}
-
-	private String currentWorldActivity(int worldId)
-	{
-		final World world = worldById(worldId);
-		if (world == null || world.getActivity() == null)
-		{
-			return "";
-		}
-		return world.getActivity().trim();
 	}
 
 	private String currentPlayerActivity(Player localPlayer, int worldId)
@@ -1813,19 +1689,6 @@ public class ClanPositionService
 	private static boolean sameText(String left, String right)
 	{
 		return (left == null ? "" : left.trim()).equals(right == null ? "" : right.trim());
-	}
-
-	private static boolean sameMenuEntry(MenuEntry left, MenuEntry right)
-	{
-		return left == right
-			|| left != null
-			&& right != null
-			&& sameText(left.getOption(), right.getOption())
-			&& sameText(left.getTarget(), right.getTarget())
-			&& left.getIdentifier() == right.getIdentifier()
-			&& left.getParam0() == right.getParam0()
-			&& left.getParam1() == right.getParam1()
-			&& left.getType() == right.getType();
 	}
 
 	private static class FinderLayout
