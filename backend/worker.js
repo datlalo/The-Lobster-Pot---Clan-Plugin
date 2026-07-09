@@ -10,8 +10,8 @@ const MAX_COORDINATE = 64000;
 const MAX_ACTIVITY_LENGTH = 80;
 const MEMBER_FEED_URL = 'https://raw.githubusercontent.com/datlalo/lobsterpot-plugin-feed/refs/heads/main/plugin-feed.json';
 const MEMBER_CACHE_MS = 60000;
-const POSITION_TTL_MS = 60000;
-const MIN_POSITION_UPDATE_MS = 4000;
+const POSITION_TTL_MS = 90000;
+const MIN_POSITION_UPDATE_MS = 8000;
 const BROADCAST_INTERVAL_MS = 5000;
 
 let memberCache = {

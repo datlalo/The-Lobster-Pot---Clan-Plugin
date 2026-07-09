@@ -64,10 +64,12 @@ public class ClanPositionService
 {
 	static final String BACKEND_URL = "https://lobsterpot-positions.lobsterpot.workers.dev";
 
-	private static final int TICKS_PER_UPDATE = 8;
+	// Evaluate sharing every ~9.6s (16 game ticks) rather than every tick, to keep backend request
+	// volume down. A clan map marker that updates ~every 10s is indistinguishable in practice.
+	private static final int TICKS_PER_UPDATE = 16;
 	// When standing still, resend at this interval so the position doesn't expire on the backend
-	// (server TTL is 60s). Movement/world/activity changes are sent as soon as they happen.
-	private static final long POSITION_HEARTBEAT_MS = 25_000L;
+	// (server TTL is 90s). Movement/world/activity changes are sent as soon as they happen.
+	private static final long POSITION_HEARTBEAT_MS = 45_000L;
 	private static final int MAX_HOP_ATTEMPTS = 3;
 	private static final int MAX_POSITION_DISTANCE = 64_000;
 	private static final int MAX_ACTIVITY_LENGTH = 80;
