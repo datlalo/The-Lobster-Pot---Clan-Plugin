@@ -67,7 +67,7 @@ public class ClanPositionService
 	private static final int TICKS_PER_UPDATE = 8;
 	// When standing still, resend at this interval so the position doesn't expire on the backend
 	// (server TTL is 60s). Movement/world/activity changes are sent as soon as they happen.
-	private static final long POSITION_HEARTBEAT_MS = 45_000L;
+	private static final long POSITION_HEARTBEAT_MS = 25_000L;
 	private static final int MAX_HOP_ATTEMPTS = 3;
 	private static final int MAX_POSITION_DISTANCE = 64_000;
 	private static final int MAX_ACTIVITY_LENGTH = 80;
@@ -168,6 +168,8 @@ public class ClanPositionService
 	// Confirmation prompt shown when a clicked clanmate isn't on the current map layer.
 	private WorldPoint pendingConfirmTarget;
 	private String pendingConfirmName;
+	// Confirmation prompt shown before a world hop, so an accidental marker click doesn't hop.
+	private ClanMemberWorldMapPoint pendingHopPoint;
 	// Persisted cache: world map region id -> map list entry name that contains it. Lets a
 	// previously resolved layer become a single clean switch instead of a full scan.
 	private final Map<Integer, String> layerMapNameByRegion = new HashMap<>();
@@ -192,6 +194,7 @@ public class ClanPositionService
 		finderExpanded = false;
 		cancelLayerFocus();
 		clearConfirmPrompt();
+		clearHopPrompt();
 		disconnectPositionSocket();
 		resetQuickHopper();
 		clientThread.invokeLater(this::clearPoints);
@@ -358,7 +361,12 @@ public class ClanPositionService
 
 		final Point mouse = client.getMouseCanvasPosition();
 
-		// While the confirmation prompt or a scan is showing, only its buttons are interactive.
+		// While a confirmation prompt or a scan is showing, only its buttons are interactive.
+		if (pendingHopPoint != null)
+		{
+			addHopConfirmMenuEntries(mouse);
+			return;
+		}
 		if (pendingConfirmTarget != null || layerFocusPhase != null)
 		{
 			addConfirmMenuEntries(mouse);
@@ -458,16 +466,41 @@ public class ClanPositionService
 			return;
 		}
 
-		final Rectangle panel = confirmPanelBounds(mapBounds);
+		final String name = hasText(pendingConfirmName) ? pendingConfirmName : "Clanmate";
+		drawConfirmPanel(graphics, confirmPanelBounds(mapBounds),
+			name + " isn't on this map layer.", "Search the other map layers for them?", "Search");
+	}
+
+	// Prompt shown before hopping worlds, so an accidental marker click can't world-hop you.
+	public void renderHopConfirmPrompt(Graphics2D graphics)
+	{
+		if (!active || graphics == null || pendingHopPoint == null || layerFocusPhase != null)
+		{
+			return;
+		}
+
+		final Rectangle mapBounds = worldMapViewBounds();
+		if (mapBounds == null)
+		{
+			clearHopPrompt();
+			return;
+		}
+
+		final String name = hasText(pendingHopPoint.getMemberName()) ? pendingHopPoint.getMemberName() : "Clanmate";
+		drawConfirmPanel(graphics, confirmPanelBounds(mapBounds),
+			"Hop to " + name + "?", "Quick-hop to World " + pendingHopPoint.getWorld() + "?", "Hop");
+	}
+
+	// Shared drawing for the two confirmation prompts: a centered panel with two text lines and a
+	// left "confirm" button (labelled per caller) plus a right "Cancel" button.
+	private void drawConfirmPanel(Graphics2D graphics, Rectangle panel, String line1, String line2, String confirmLabel)
+	{
 		graphics.setColor(FINDER_BACKGROUND);
 		graphics.fillRoundRect(panel.x, panel.y, panel.width, panel.height, 8, 8);
 		graphics.setColor(FINDER_BORDER);
 		graphics.drawRoundRect(panel.x, panel.y, panel.width, panel.height, 8, 8);
 
 		final FontMetrics metrics = graphics.getFontMetrics();
-		final String name = hasText(pendingConfirmName) ? pendingConfirmName : "Clanmate";
-		final String line1 = name + " isn't on this map layer.";
-		final String line2 = "Search the other map layers for them?";
 		graphics.setColor(FINDER_TEXT);
 		graphics.drawString(fitText(line1, metrics, panel.width - CONFIRM_PADDING * 2),
 			panel.x + CONFIRM_PADDING, panel.y + CONFIRM_PADDING + metrics.getAscent());
@@ -476,7 +509,7 @@ public class ClanPositionService
 			panel.x + CONFIRM_PADDING, panel.y + CONFIRM_PADDING + metrics.getHeight() + metrics.getAscent());
 
 		final Point mouse = client.getMouseCanvasPosition();
-		drawConfirmButton(graphics, confirmSearchBounds(panel), "Search", mouse, true);
+		drawConfirmButton(graphics, confirmSearchBounds(panel), confirmLabel, mouse, true);
 		drawConfirmButton(graphics, confirmCancelBounds(panel), "Cancel", mouse, false);
 	}
 
@@ -492,6 +525,40 @@ public class ClanPositionService
 		graphics.setColor(accent ? FINDER_ACCENT : FINDER_TEXT);
 		graphics.drawString(label, bounds.x + (bounds.width - metrics.stringWidth(label)) / 2,
 			bounds.y + (bounds.height - metrics.getHeight()) / 2 + metrics.getAscent());
+	}
+
+	private void addHopConfirmMenuEntries(Point mouse)
+	{
+		if (pendingHopPoint == null)
+		{
+			return;
+		}
+
+		final Rectangle mapBounds = worldMapViewBounds();
+		if (mapBounds == null)
+		{
+			return;
+		}
+
+		final Rectangle panel = confirmPanelBounds(mapBounds);
+		if (contains(confirmSearchBounds(panel), mouse))
+		{
+			client.createMenuEntry(-1)
+				.setOption("Hop")
+				.setTarget(hasText(pendingHopPoint.getMemberName()) ? pendingHopPoint.getMemberName() : "")
+				.setType(MenuAction.RUNELITE)
+				.setForceLeftClick(true)
+				.onClick(entry -> confirmHop());
+		}
+		else if (contains(confirmCancelBounds(panel), mouse))
+		{
+			client.createMenuEntry(-1)
+				.setOption("Cancel")
+				.setTarget("")
+				.setType(MenuAction.RUNELITE)
+				.setForceLeftClick(true)
+				.onClick(entry -> clearHopPrompt());
+		}
 	}
 
 	private void addConfirmMenuEntries(Point mouse)
@@ -559,6 +626,7 @@ public class ClanPositionService
 		trackedPoints.clear();
 		finderExpanded = false;
 		clearConfirmPrompt();
+		clearHopPrompt();
 		cancelLayerFocus();
 	}
 
@@ -738,9 +806,11 @@ public class ClanPositionService
 
 			cancelLayerFocus();
 
-			// A previously resolved layer is a single clean switch, so go straight there. Only
-			// ask for confirmation when the target's layer is unknown and a full scan is needed.
-			if (layerMapNameByRegion.containsKey(target.getRegionID()))
+			// A cached layer, or the nearest-center table lookup, resolves to a single clean switch,
+			// so go straight there. Only fall back to the confirm-then-scan prompt when neither can
+			// predict a layer for the target at all.
+			if (layerMapNameByRegion.containsKey(target.getRegionID())
+				|| hasText(WorldMapLayers.nearestLayerName(target.getX(), target.getY())))
 			{
 				clearConfirmPrompt();
 				beginLayerFocus(target, memberName);
@@ -776,6 +846,14 @@ public class ClanPositionService
 		layerFocusMemberName = memberName;
 		layerFocusRegion = target.getRegionID();
 		layerFocusPreferredName = layerMapNameByRegion.get(layerFocusRegion);
+		if (!hasText(layerFocusPreferredName))
+		{
+			// No cached layer for this region yet, so guess the layer whose map center is nearest
+			// the target and try it first. loadNextLayerEntry verifies the guess with
+			// surfaceContainsPosition and falls back to a full scan if it is wrong, so a bad guess
+			// is self-correcting; a correct one is a single clean switch and gets cached below.
+			layerFocusPreferredName = WorldMapLayers.nearestLayerName(target.getX(), target.getY());
+		}
 		layerFocusTriedPreferred = false;
 		layerFocusCurrentEntryName = null;
 		layerFocusIndex = 0;
@@ -1431,8 +1509,25 @@ public class ClanPositionService
 
 	private void hopTo(ClanMemberWorldMapPoint point)
 	{
-		final int worldId = point.getWorld();
-		clientThread.invoke(() -> startWorldHop(worldId));
+		// Don't hop straight away - it's easy to click a marker by accident. Show a confirmation
+		// prompt on the map first; the actual hop only happens once the user clicks "Hop".
+		pendingHopPoint = point;
+	}
+
+	private void confirmHop()
+	{
+		final ClanMemberWorldMapPoint point = pendingHopPoint;
+		clearHopPrompt();
+		if (point != null)
+		{
+			final int worldId = point.getWorld();
+			clientThread.invoke(() -> startWorldHop(worldId));
+		}
+	}
+
+	private void clearHopPrompt()
+	{
+		pendingHopPoint = null;
 	}
 
 	private void startWorldHop(int worldId)
