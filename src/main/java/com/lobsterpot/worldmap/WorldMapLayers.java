@@ -1,5 +1,10 @@
 package com.lobsterpot.worldmap;
 
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Comparator;
+import java.util.List;
+
 /**
  * Static table of world map "map list" layers and their approximate center coordinates, mirroring
  * the selectable entries in the world map dropdown (RuneLite map ids 0-51, excluding the two unused
@@ -88,25 +93,27 @@ final class WorldMapLayers
 	}
 
 	/**
-	 * Returns the name of the map layer whose center is nearest the given world coordinate, or
-	 * null if the table is empty. This is a best guess only; the caller must verify the coordinate
-	 * is actually on that layer before using it.
+	 * Returns up to {@code limit} layer names ordered by how close their center is to the given
+	 * world coordinate (nearest first). These are best guesses only; the caller must verify the
+	 * coordinate is actually on a layer before using it.
 	 */
-	static String nearestLayerName(int x, int y)
+	static List<String> nearestLayerNames(int x, int y, int limit)
 	{
-		String best = null;
-		long bestDistSq = Long.MAX_VALUE;
-		for (Layer layer : LAYERS)
+		final List<Layer> sorted = new ArrayList<>(Arrays.asList(LAYERS));
+		sorted.sort(Comparator.comparingLong(layer -> distanceSquared(x, y, layer)));
+
+		final List<String> names = new ArrayList<>();
+		for (int i = 0; i < sorted.size() && i < limit; i++)
 		{
-			final long dx = x - layer.x;
-			final long dy = y - layer.y;
-			final long distSq = dx * dx + dy * dy;
-			if (distSq < bestDistSq)
-			{
-				bestDistSq = distSq;
-				best = layer.name;
-			}
+			names.add(sorted.get(i).name);
 		}
-		return best;
+		return names;
+	}
+
+	private static long distanceSquared(int x, int y, Layer layer)
+	{
+		final long dx = x - layer.x;
+		final long dy = y - layer.y;
+		return dx * dx + dy * dy;
 	}
 }

@@ -98,6 +98,10 @@ public class ClanPositionService
 	private static final int LAYER_FOCUS_MAX_WAIT_TICKS = 2;
 	// Hard cap (client ticks) on how long the whole layer search may run, as a safety net.
 	private static final int LAYER_FOCUS_MAX_TOTAL_TICKS = 800;
+	// Max candidate layers (nearest map center first) to try before concluding the target isn't on
+	// the map - almost always they're inside an instance. A real dungeon resolves in the first one
+	// or two, so this avoids flickering through every layer for an unmappable target.
+	private static final int LAYER_FOCUS_MAX_CANDIDATES = 6;
 	private static final String CONFIG_GROUP = "lobsterpot";
 	private static final String LAYER_CACHE_KEY = "worldMapLayerCache";
 	private static final Color LAYER_COVER_BACKGROUND = new Color(18, 18, 18, 236);
@@ -157,8 +161,7 @@ public class ClanPositionService
 	private WorldPoint layerFocusTarget;
 	private String layerFocusMemberName;
 	private int layerFocusRegion;
-	private String layerFocusPreferredName;
-	private boolean layerFocusTriedPreferred;
+	private List<String> layerFocusCandidates = new ArrayList<>();
 	private String layerFocusCurrentEntryName;
 	private int layerFocusIndex;
 	private int layerFocusEntryTotal;
@@ -757,22 +760,34 @@ public class ClanPositionService
 		layerFocusTarget = target;
 		layerFocusMemberName = memberName;
 		layerFocusRegion = target.getRegionID();
-		layerFocusPreferredName = layerMapNameByRegion.get(layerFocusRegion);
-		if (!hasText(layerFocusPreferredName))
-		{
-			// No cached layer for this region yet, so guess the layer whose map center is nearest
-			// the target and try it first. loadNextLayerEntry verifies the guess with
-			// surfaceContainsPosition and falls back to a full scan if it is wrong, so a bad guess
-			// is self-correcting; a correct one is a single clean switch and gets cached below.
-			layerFocusPreferredName = WorldMapLayers.nearestLayerName(target.getX(), target.getY());
-		}
-		layerFocusTriedPreferred = false;
+		layerFocusCandidates = buildLayerCandidates(target);
 		layerFocusCurrentEntryName = null;
 		layerFocusIndex = 0;
-		layerFocusEntryTotal = 0;
+		layerFocusEntryTotal = layerFocusCandidates.size();
 		layerFocusWaitTicks = 0;
 		layerFocusTotalTicks = 0;
 		layerFocusScanLogged = false;
+	}
+
+	// The layers worth trying for this target, nearest map center first and capped, so an unmappable
+	// target (e.g. a clanmate inside an instance) fails fast instead of flickering through every
+	// layer. A cached layer for the region, if any, is tried first as an authoritative single switch.
+	private List<String> buildLayerCandidates(WorldPoint target)
+	{
+		final List<String> candidates = new ArrayList<>();
+		final String cached = layerMapNameByRegion.get(target.getRegionID());
+		if (hasText(cached))
+		{
+			candidates.add(cached);
+		}
+		for (String name : WorldMapLayers.nearestLayerNames(target.getX(), target.getY(), LAYER_FOCUS_MAX_CANDIDATES))
+		{
+			if (!candidates.contains(name))
+			{
+				candidates.add(name);
+			}
+		}
+		return candidates;
 	}
 
 	private void cancelLayerFocus()
@@ -839,46 +854,37 @@ public class ClanPositionService
 			// List not available yet; keep waiting (bounded by the total tick budget).
 			return;
 		}
-		layerFocusEntryTotal = entries.length;
-
-		// Try the cached map for this region first, so a known layer is a single clean switch.
-		if (hasText(layerFocusPreferredName) && !layerFocusTriedPreferred)
-		{
-			layerFocusTriedPreferred = true;
-			final Widget preferred = findEntryByName(entries, layerFocusPreferredName);
-			if (preferred != null)
-			{
-				layerFocusCurrentEntryName = layerFocusPreferredName;
-				layerFocusWaitTicks = 0;
-				if (invokeWidgetOp(preferred))
-				{
-					layerFocusPhase = LayerFocusPhase.WAIT;
-					return;
-				}
-			}
-		}
 
 		if (!layerFocusScanLogged)
 		{
-			log.debug("[LobsterPot] scanning {} world map layers for {}", entries.length, layerFocusMemberName);
+			log.debug("[LobsterPot] trying {} candidate map layers for {}", layerFocusCandidates.size(), layerFocusMemberName);
 			layerFocusScanLogged = true;
 		}
 
-		if (layerFocusIndex >= entries.length)
+		// Try each candidate layer (nearest map center first) until one contains the target. If the
+		// short candidate list is exhausted, the target isn't on any nearby map - almost certainly
+		// they're inside an instance - so give up rather than flickering through every layer.
+		while (layerFocusIndex < layerFocusCandidates.size())
 		{
-			log.debug("[LobsterPot] no world map layer contained {}", layerFocusMemberName);
-			abortLayerFocus();
+			final String name = layerFocusCandidates.get(layerFocusIndex);
+			layerFocusIndex++;
+			final Widget entry = findEntryByName(entries, name);
+			if (entry == null)
+			{
+				// This map isn't in the live list (e.g. name drift); skip to the next candidate.
+				continue;
+			}
+			layerFocusCurrentEntryName = name;
+			layerFocusWaitTicks = 0;
+			if (invokeWidgetOp(entry))
+			{
+				layerFocusPhase = LayerFocusPhase.WAIT;
+			}
 			return;
 		}
 
-		final Widget entry = entries[layerFocusIndex];
-		layerFocusIndex++;
-		layerFocusCurrentEntryName = entry.getText();
-		layerFocusWaitTicks = 0;
-		if (invokeWidgetOp(entry))
-		{
-			layerFocusPhase = LayerFocusPhase.WAIT;
-		}
+		log.debug("[LobsterPot] {} not found on any nearby map layer", layerFocusMemberName);
+		abortLayerFocus();
 	}
 
 	private static Widget findEntryByName(Widget[] entries, String name)
@@ -959,8 +965,8 @@ public class ClanPositionService
 		if (hasText(memberName))
 		{
 			client.addChatMessage(ChatMessageType.CONSOLE, "", memberName
-				+ " is on a world map layer that could not be focused automatically."
-				+ " Use the map list at the bottom of the world map.", null);
+				+ " isn't on any nearby map layer - they may be inside an instance,"
+				+ " so their spot can't be shown on the world map.", null);
 		}
 	}
 
