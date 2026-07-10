@@ -92,6 +92,8 @@ public class ClanPositionService
 	private static final long SOCKET_RECONNECT_DELAY_MS = 10_000L;
 	// World map "map list" dropdown at the bottom of the world map (gameval component ids).
 	private static final int MAPLIST_LIST = net.runelite.api.gameval.InterfaceID.Worldmap.MAPLIST_LIST;
+	// The default overworld map layer, used as a fallback when a target can't be located.
+	private static final String SURFACE_MAP_NAME = "Gielinor Surface";
 	// Op index for a map list entry's "Select" action (action 0 -> op 1). The entries carry an
 	// onOp listener even while the dropdown is collapsed, so we can select a map without opening it.
 	private static final int MAPLIST_SELECT_OP = 1;
@@ -964,11 +966,25 @@ public class ClanPositionService
 	{
 		final String memberName = layerFocusMemberName;
 		cancelLayerFocus();
+		// Leave the user on the main surface map rather than stranded on whatever layer was last
+		// tried during the (failed) search.
+		switchToSurfaceMap();
 		if (hasText(memberName))
 		{
 			client.addChatMessage(ChatMessageType.CONSOLE, "", memberName
 				+ " isn't on any nearby map layer - they may be inside an instance,"
 				+ " so their spot can't be shown on the world map.", null);
+		}
+	}
+
+	private void switchToSurfaceMap()
+	{
+		final Widget list = client.getWidget(MAPLIST_LIST);
+		final Widget[] entries = list == null ? new Widget[0] : mapListEntries(list);
+		final Widget surface = findEntryByName(entries, SURFACE_MAP_NAME);
+		if (surface != null)
+		{
+			invokeWidgetOp(surface);
 		}
 	}
 
