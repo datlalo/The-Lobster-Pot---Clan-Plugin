@@ -345,7 +345,10 @@ function cleanActivity(activity) {
 }
 
 function memberKey(rsn) {
-	return String(rsn || '').replace(/[\s_-\u00a0]+/g, '').toLowerCase();
+	// Strip whitespace, underscores, hyphens and non-breaking spaces, then lowercase. The hyphen is
+	// escaped: unescaped, `_-\u00a0` is a range (0x5F-0xA0) that also strips a-z, collapsing most
+	// names and breaking membership matching for anyone whose feed name isn't already uppercase.
+	return String(rsn || '').replace(/[\s_\-\u00a0]+/g, '').toLowerCase();
 }
 
 function corsResponse(response) {
