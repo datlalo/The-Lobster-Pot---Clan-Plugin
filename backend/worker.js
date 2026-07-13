@@ -330,19 +330,24 @@ export class BountyRoom extends DurableObject {
 		if (!Array.isArray(ids) || ids.length === 0) {
 			return { consumed: 0 };
 		}
+		const validIds = ids.map((x) => Math.trunc(Number(x))).filter((n) => Number.isFinite(n));
+		if (validIds.length === 0) {
+			return { consumed: 0 };
+		}
+
 		const now = Date.now();
-		let consumed = 0;
-		for (const rawId of ids) {
-			const id = Math.trunc(Number(rawId));
-			if (!Number.isFinite(id)) {
-				continue;
-			}
-			const cursor = this.sql.exec(
-				"UPDATE submissions SET status = 'consumed', consumed_at = ? WHERE id = ? AND status = 'pending'",
+		const placeholders = validIds.map(() => '?').join(',');
+		// Count the rows we will actually consume by querying first (rowsWritten counts index writes
+		// too, so it can't be used as a logical row count).
+		const consumed = this.sql
+			.exec(`SELECT COUNT(*) AS n FROM submissions WHERE status = 'pending' AND id IN (${placeholders})`, ...validIds)
+			.toArray()[0].n;
+		if (consumed > 0) {
+			this.sql.exec(
+				`UPDATE submissions SET status = 'consumed', consumed_at = ? WHERE status = 'pending' AND id IN (${placeholders})`,
 				now,
-				id
+				...validIds
 			);
-			consumed += cursor.rowsWritten;
 		}
 		this.sql.exec("DELETE FROM submissions WHERE status = 'consumed' AND consumed_at < ?", now - BOUNTY_RETENTION_MS);
 		return { consumed };
