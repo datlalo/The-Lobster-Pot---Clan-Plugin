@@ -14,9 +14,22 @@ const POSITION_TTL_MS = 90000;
 const MIN_POSITION_UPDATE_MS = 8000;
 const BROADCAST_INTERVAL_MS = 5000;
 
+// Bounty submissions: members POST completions, the Discord bot pulls + acks them.
+const MAX_NOTE_LENGTH = 280;
+const MAX_BOUNTY_ID_LENGTH = 64;
+const BOUNTY_RATE_WINDOW_MS = 60000; // per-member submission window
+const BOUNTY_RATE_MAX = 5; // max submissions per member per window
+const BOUNTY_PENDING_LIMIT = 200; // max rows returned to the bot per pull
+const BOUNTY_RETENTION_MS = 7 * 24 * 60 * 60 * 1000; // purge consumed rows after 7 days
+
 let memberCache = {
 	expiresAt: 0,
 	keys: new Set(),
+};
+
+let bountyCache = {
+	expiresAt: 0,
+	ids: new Set(),
 };
 
 export class ClanPositionRoom extends DurableObject {
@@ -249,6 +262,93 @@ export class ClanPositionRoom extends DurableObject {
 	}
 }
 
+// Durable, SQLite-backed queue of bounty completion submissions. A single named instance serializes
+// writes so dedup + rate limiting are race-free. The Discord bot pulls pending rows, records them as
+// pending claims, then acks them; consumed rows are purged after a short retention window.
+export class BountyRoom extends DurableObject {
+	constructor(ctx, env) {
+		super(ctx, env);
+		this.sql = ctx.storage.sql;
+		this.sql.exec(
+			`CREATE TABLE IF NOT EXISTS submissions (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				rsn_key TEXT NOT NULL,
+				rsn TEXT NOT NULL,
+				bounty_id TEXT NOT NULL,
+				note TEXT,
+				status TEXT NOT NULL,
+				created_at INTEGER NOT NULL,
+				consumed_at INTEGER
+			)`
+		);
+		this.sql.exec('CREATE INDEX IF NOT EXISTS idx_submissions_lookup ON submissions (rsn_key, bounty_id, status)');
+	}
+
+	submit({ rsnKey, rsn, bountyId, note }) {
+		const now = Date.now();
+
+		const recent = this.sql
+			.exec('SELECT COUNT(*) AS n FROM submissions WHERE rsn_key = ? AND created_at > ?', rsnKey, now - BOUNTY_RATE_WINDOW_MS)
+			.toArray()[0];
+		if (recent && recent.n >= BOUNTY_RATE_MAX) {
+			return { code: 429, status: 'rate_limited' };
+		}
+
+		const existing = this.sql
+			.exec(
+				"SELECT id FROM submissions WHERE rsn_key = ? AND bounty_id = ? AND status IN ('pending', 'consumed') LIMIT 1",
+				rsnKey,
+				bountyId
+			)
+			.toArray();
+		if (existing.length > 0) {
+			return { code: 409, status: 'already_submitted' };
+		}
+
+		this.sql.exec(
+			'INSERT INTO submissions (rsn_key, rsn, bounty_id, note, status, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+			rsnKey,
+			rsn,
+			bountyId,
+			note || '',
+			'pending',
+			now
+		);
+		return { code: 200, status: 'submitted' };
+	}
+
+	listPending(limit) {
+		return this.sql
+			.exec(
+				"SELECT id, rsn, rsn_key, bounty_id, note, created_at FROM submissions WHERE status = 'pending' ORDER BY id LIMIT ?",
+				limit
+			)
+			.toArray();
+	}
+
+	ack(ids) {
+		if (!Array.isArray(ids) || ids.length === 0) {
+			return { consumed: 0 };
+		}
+		const now = Date.now();
+		let consumed = 0;
+		for (const rawId of ids) {
+			const id = Math.trunc(Number(rawId));
+			if (!Number.isFinite(id)) {
+				continue;
+			}
+			const cursor = this.sql.exec(
+				"UPDATE submissions SET status = 'consumed', consumed_at = ? WHERE id = ? AND status = 'pending'",
+				now,
+				id
+			);
+			consumed += cursor.rowsWritten;
+		}
+		this.sql.exec("DELETE FROM submissions WHERE status = 'consumed' AND consumed_at < ?", now - BOUNTY_RETENTION_MS);
+		return { consumed };
+	}
+}
+
 export default {
 	async fetch(request, env) {
 		const url = new URL(request.url);
@@ -262,6 +362,18 @@ export default {
 			return env.POSITION_ROOM.get(id).fetch(request);
 		}
 
+		if (url.pathname === '/bounty' && request.method === 'POST') {
+			return handleBountySubmit(request, env);
+		}
+
+		if (url.pathname === '/bounty/pending' && request.method === 'GET') {
+			return handleBountyPending(request, env);
+		}
+
+		if (url.pathname === '/bounty/ack' && request.method === 'POST') {
+			return handleBountyAck(request, env);
+		}
+
 		if (url.pathname === '/health') {
 			return corsResponse(new Response('OK', { status: 200 }));
 		}
@@ -269,6 +381,67 @@ export default {
 		return corsResponse(new Response('Not Found', { status: 404 }));
 	},
 };
+
+async function handleBountySubmit(request, env) {
+	let data;
+	try {
+		data = await request.json();
+	} catch {
+		return jsonResponse(400, { status: 'bad_request', message: 'Invalid JSON.' });
+	}
+	if (!isValidBountySubmission(data)) {
+		return jsonResponse(400, { status: 'bad_request', message: 'Invalid bounty submission.' });
+	}
+
+	const key = memberKey(data.rsn);
+	let memberKeys;
+	let bountyIds;
+	try {
+		memberKeys = await clanMemberKeys();
+		bountyIds = await activeBountyIds();
+	} catch {
+		return jsonResponse(503, { status: 'unavailable', message: 'Clan feed unavailable.' });
+	}
+	if (!memberKeys.has(key)) {
+		return jsonResponse(403, { status: 'forbidden', message: 'Only LobsterPot members can submit bounties.' });
+	}
+	if (!bountyIds.has(data.bountyId)) {
+		return jsonResponse(400, { status: 'unknown_bounty', message: 'That bounty is not active.' });
+	}
+
+	const id = env.BOUNTY_ROOM.idFromName('lobsterpot');
+	const result = await env.BOUNTY_ROOM.get(id).submit({
+		rsnKey: key,
+		rsn: String(data.rsn).trim(),
+		bountyId: data.bountyId,
+		note: cleanNote(data.note),
+	});
+	return jsonResponse(result.code, { status: result.status });
+}
+
+async function handleBountyPending(request, env) {
+	if (!requireBotAuth(request, env)) {
+		return jsonResponse(401, { status: 'unauthorized' });
+	}
+	const id = env.BOUNTY_ROOM.idFromName('lobsterpot');
+	const submissions = await env.BOUNTY_ROOM.get(id).listPending(BOUNTY_PENDING_LIMIT);
+	return jsonResponse(200, { submissions });
+}
+
+async function handleBountyAck(request, env) {
+	if (!requireBotAuth(request, env)) {
+		return jsonResponse(401, { status: 'unauthorized' });
+	}
+	let data;
+	try {
+		data = await request.json();
+	} catch {
+		return jsonResponse(400, { status: 'bad_request' });
+	}
+	const id = env.BOUNTY_ROOM.idFromName('lobsterpot');
+	const result = await env.BOUNTY_ROOM.get(id).ack(data && data.ids);
+	return jsonResponse(200, { consumed: result.consumed });
+}
 
 async function clanMemberKeys() {
 	const now = Date.now();
@@ -300,6 +473,85 @@ async function clanMemberKeys() {
 		keys,
 	};
 	return keys;
+}
+
+async function activeBountyIds() {
+	const now = Date.now();
+	if (bountyCache.expiresAt > now) {
+		return bountyCache.ids;
+	}
+
+	const response = await fetch(MEMBER_FEED_URL, {
+		headers: { Accept: 'application/json' },
+		cf: { cacheTtl: 60 },
+	});
+	if (!response.ok) {
+		throw new Error(`Member feed failed: ${response.status}`);
+	}
+
+	const feed = await response.json();
+	const ids = new Set();
+	for (const bounty of feed.bounties || []) {
+		if (bounty && bounty.active && typeof bounty.id === 'string' && bounty.id) {
+			ids.add(bounty.id);
+		}
+	}
+
+	bountyCache = { expiresAt: now + MEMBER_CACHE_MS, ids };
+	return ids;
+}
+
+function isValidBountySubmission(body) {
+	return body
+		&& typeof body.rsn === 'string'
+		&& body.rsn.trim().length > 0
+		&& typeof body.bountyId === 'string'
+		&& body.bountyId.length > 0
+		&& body.bountyId.length <= MAX_BOUNTY_ID_LENGTH
+		&& (body.note === undefined || body.note === null || typeof body.note === 'string');
+}
+
+function cleanNote(note) {
+	if (typeof note !== 'string') {
+		return '';
+	}
+	return note.replace(/\s+/g, ' ').trim().slice(0, MAX_NOTE_LENGTH);
+}
+
+function requireBotAuth(request, env) {
+	const token = env.BOT_TOKEN;
+	if (!token) {
+		return false;
+	}
+	const header = request.headers.get('Authorization') || '';
+	const prefix = 'Bearer ';
+	if (!header.startsWith(prefix)) {
+		return false;
+	}
+	return timingSafeEqual(header.slice(prefix.length), token);
+}
+
+function timingSafeEqual(a, b) {
+	const encoder = new TextEncoder();
+	const aBytes = encoder.encode(a);
+	const bBytes = encoder.encode(b);
+	if (aBytes.length !== bBytes.length) {
+		return false;
+	}
+	let diff = 0;
+	for (let i = 0; i < aBytes.length; i++) {
+		diff |= aBytes[i] ^ bBytes[i];
+	}
+	return diff === 0;
+}
+
+function jsonResponse(status, body) {
+	return corsResponse(
+		new Response(JSON.stringify(body), {
+			status,
+			headers: { 'Content-Type': 'application/json' },
+		})
+	);
 }
 
 function isValidPosition(body) {
@@ -354,7 +606,7 @@ function memberKey(rsn) {
 function corsResponse(response) {
 	const headers = new Headers(response.headers);
 	headers.set('Access-Control-Allow-Origin', '*');
-	headers.set('Access-Control-Allow-Methods', 'GET, OPTIONS');
-	headers.set('Access-Control-Allow-Headers', 'Content-Type');
+	headers.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+	headers.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 	return new Response(response.body, { status: response.status, headers });
 }

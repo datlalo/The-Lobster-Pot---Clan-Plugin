@@ -16,6 +16,13 @@ world-map tile position, plane, and detected activity to the LobsterPot position
 backend keeps live positions in memory so other LobsterPot members can see each other on the world
 map. Posting can be disabled from the plugin config with `Share world map location`.
 
+Members can also submit completed clan bounties for points from the panel's Bounties section. The
+active bounty list comes from the same GitHub feed; submitting sends the logged-in character name
+plus the chosen bounty id and an optional note to the backend (`POST /bounty`). Submissions are
+queued for the Discord bot to pull and record as pending, and only count once an admin approves in
+Discord - the plugin never awards points itself. The section can be hidden with
+`Show bounty submissions`.
+
 ## Current behavior
 
 - Checks the active character's RuneScape clan membership through RuneLite's clan APIs.
@@ -27,10 +34,13 @@ map. Posting can be disabled from the plugin config with `Share world map locati
 - Fetches public broadcasts/events from the built-in GitHub feed URL without requiring login.
 - Shows LobsterPot members on the RuneLite world map, including their world, rank icon, and detected
   activity when available.
+- Lets members submit completed clan bounties for points; submissions are queued for the Discord bot
+  and only count after an admin approves them.
 
 ## Configuration
 
 - `Share world map location`: share this character's current world-map position with the clan map.
+- `Show bounty submissions`: show the Bounties section so you can submit completed clan bounties.
 
 ## Building
 

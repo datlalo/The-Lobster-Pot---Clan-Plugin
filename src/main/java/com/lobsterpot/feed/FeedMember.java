@@ -1,6 +1,8 @@
 package com.lobsterpot.feed;
 
 import com.google.gson.annotations.SerializedName;
+import java.util.Collections;
+import java.util.List;
 
 public class FeedMember
 {
@@ -38,6 +40,9 @@ public class FeedMember
 
 	@SerializedName("pending_join_date_claim")
 	private FeedPendingClaim pendingJoinDateClaim;
+
+	@SerializedName("pending_bounties")
+	private List<FeedPendingBounty> pendingBounties;
 
 	public String getRsn()
 	{
@@ -97,5 +102,10 @@ public class FeedMember
 	public FeedPendingClaim getPendingJoinDateClaim()
 	{
 		return pendingJoinDateClaim;
+	}
+
+	public List<FeedPendingBounty> getPendingBounties()
+	{
+		return pendingBounties == null ? Collections.emptyList() : pendingBounties;
 	}
 }

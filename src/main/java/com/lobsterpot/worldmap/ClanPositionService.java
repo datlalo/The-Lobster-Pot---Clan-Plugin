@@ -62,7 +62,7 @@ import okhttp3.WebSocketListener;
 @Singleton
 public class ClanPositionService
 {
-	static final String BACKEND_URL = "https://lobsterpot-positions.lobsterpot.workers.dev";
+	static final String BACKEND_URL = com.lobsterpot.Backend.URL;
 
 	// Evaluate sharing every ~9.6s (16 game ticks) rather than every tick, to keep backend request
 	// volume down. A clan map marker that updates ~every 10s is indistinguishable in practice.

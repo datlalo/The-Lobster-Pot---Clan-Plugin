@@ -1,0 +1,7 @@
+# Local wrangler dev secrets - never commit (holds BOT_TOKEN etc.)
+.dev.vars
+.dev.vars.*
+
+# Local wrangler emulator state
+.wrangler/
+node_modules/

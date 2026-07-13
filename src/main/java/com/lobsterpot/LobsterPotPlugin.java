@@ -2,6 +2,8 @@ package com.lobsterpot;
 
 import com.google.inject.Provides;
 import com.lobsterpot.ClanMembershipService.ClanAccess;
+import com.lobsterpot.bounty.BountySubmissionClient;
+import com.lobsterpot.bounty.BountySubmissionResult;
 import com.lobsterpot.feed.FeedBroadcast;
 import com.lobsterpot.feed.FeedMember;
 import com.lobsterpot.feed.FeedNextRank;
@@ -78,6 +80,9 @@ public class LobsterPotPlugin extends Plugin
 	private PluginFeedClient pluginFeedClient;
 
 	@Inject
+	private BountySubmissionClient bountySubmissionClient;
+
+	@Inject
 	private RankRequirementEvaluator rankRequirementEvaluator;
 
 	@Inject
@@ -105,7 +110,8 @@ public class LobsterPotPlugin extends Plugin
 	protected void startUp()
 	{
 		clearLegacyConfig();
-		panel.init(this::refreshAll);
+		panel.init(this::refreshAll, this::submitBounty);
+		panel.setBountiesEnabled(config.enableBountySubmission());
 
 		final BufferedImage icon = ImageUtil.loadImageResource(getClass(), "/com/lobsterpot/icon.png");
 		navButton = NavigationButton.builder()
@@ -246,6 +252,32 @@ public class LobsterPotPlugin extends Plugin
 				currentFeed = null;
 				requirementRequestId.incrementAndGet();
 				SwingUtilities.invokeLater(() -> panel.renderFeed(null, error));
+			}
+		});
+	}
+
+	private void submitBounty(String bountyId, String note)
+	{
+		final ClanAccess access = currentAccess;
+		final String rsn = access == null ? null : access.getPlayerName();
+		if (access == null || !access.isAllowed() || rsn == null || rsn.trim().isEmpty())
+		{
+			SwingUtilities.invokeLater(() -> panel.showBountyError("Log in as a LobsterPot member to submit."));
+			return;
+		}
+
+		bountySubmissionClient.submit(rsn, bountyId, note, new BountySubmissionClient.SubmitCallback()
+		{
+			@Override
+			public void onSuccess(BountySubmissionResult result)
+			{
+				SwingUtilities.invokeLater(() -> panel.markBountySubmitted(bountyId));
+			}
+
+			@Override
+			public void onFailure(String error)
+			{
+				SwingUtilities.invokeLater(() -> panel.showBountyError(error));
 			}
 		});
 	}

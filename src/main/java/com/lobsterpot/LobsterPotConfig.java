@@ -17,4 +17,15 @@ public interface LobsterPotConfig extends Config
 	{
 		return true;
 	}
+
+	@ConfigItem(
+		keyName = "enableBountySubmission",
+		name = "Show bounty submissions",
+		description = "Show the Bounties section in the panel so you can submit completed clan bounties for points.",
+		position = 1
+	)
+	default boolean enableBountySubmission()
+	{
+		return true;
+	}
 }

@@ -14,6 +14,7 @@ public class PluginFeed
 	private List<FeedBroadcast> broadcasts;
 	private List<FeedEvent> events;
 	private List<FeedMember> members;
+	private List<FeedBounty> bounties;
 
 	public int getVersion()
 	{
@@ -38,5 +39,10 @@ public class PluginFeed
 	public List<FeedMember> getMembers()
 	{
 		return members == null ? Collections.emptyList() : members;
+	}
+
+	public List<FeedBounty> getBounties()
+	{
+		return bounties == null ? Collections.emptyList() : bounties;
 	}
 }
