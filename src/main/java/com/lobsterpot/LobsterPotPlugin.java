@@ -27,7 +27,6 @@ import net.runelite.api.events.ClanChannelChanged;
 import net.runelite.api.events.ClientTick;
 import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.GameTick;
-import net.runelite.api.events.MenuEntryAdded;
 import net.runelite.api.events.PostMenuSort;
 import net.runelite.client.callback.ClientThread;
 import net.runelite.client.config.ConfigManager;
@@ -155,16 +154,9 @@ public class LobsterPotPlugin extends Plugin
 	}
 
 	@Subscribe
-	public void onMenuEntryAdded(MenuEntryAdded event)
-	{
-		clanPositionService.addHopMenuEntry(event);
-	}
-
-	@Subscribe
 	public void onPostMenuSort(PostMenuSort event)
 	{
 		clanPositionService.addHoveredMapMenuEntry();
-		clanPositionService.rewriteHopMenuEntries();
 	}
 
 	@Subscribe

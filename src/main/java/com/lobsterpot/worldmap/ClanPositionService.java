@@ -12,7 +12,6 @@ import java.awt.image.BufferedImage;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
-import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -26,31 +25,23 @@ import net.runelite.api.Actor;
 import net.runelite.api.AnimationID;
 import net.runelite.api.ChatMessageType;
 import net.runelite.api.Client;
-import net.runelite.api.GameState;
 import net.runelite.api.MenuAction;
-import net.runelite.api.MenuEntry;
 import net.runelite.api.Point;
 import net.runelite.api.Player;
-import net.runelite.api.World;
-import net.runelite.api.WorldType;
 import net.runelite.api.clan.ClanChannel;
 import net.runelite.api.clan.ClanChannelMember;
 import net.runelite.api.clan.ClanRank;
 import net.runelite.api.clan.ClanSettings;
 import net.runelite.api.clan.ClanTitle;
 import net.runelite.api.coords.WorldPoint;
-import net.runelite.api.events.MenuEntryAdded;
 import net.runelite.api.widgets.ComponentID;
 import net.runelite.api.widgets.Widget;
 import net.runelite.api.worldmap.WorldMap;
 import net.runelite.client.callback.ClientThread;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.game.ChatIconManager;
-import net.runelite.client.game.WorldService;
 import net.runelite.client.ui.overlay.worldmap.WorldMapPointManager;
 import net.runelite.client.util.Text;
-import net.runelite.client.util.WorldUtil;
-import net.runelite.http.api.worlds.WorldResult;
 import okhttp3.HttpUrl;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
@@ -70,10 +61,8 @@ public class ClanPositionService
 	// When standing still, resend at this interval so the position doesn't expire on the backend
 	// (server TTL is 90s). Movement/world/activity changes are sent as soon as they happen.
 	private static final long POSITION_HEARTBEAT_MS = 45_000L;
-	private static final int MAX_HOP_ATTEMPTS = 3;
 	private static final int MAX_POSITION_DISTANCE = 64_000;
 	private static final int MAX_ACTIVITY_LENGTH = 80;
-	private static final int MAP_MARKER_HOVER_PADDING = 6;
 	private static final int FINDER_BUTTON_SIZE = 28;
 	private static final int FINDER_MARGIN = 12;
 	private static final int FINDER_PANEL_GAP = 6;
@@ -109,10 +98,6 @@ public class ClanPositionService
 	private static final String CONFIG_GROUP = "lobsterpot";
 	private static final String LAYER_CACHE_KEY = "worldMapLayerCache";
 	private static final Color LAYER_COVER_BACKGROUND = new Color(18, 18, 18, 236);
-	private static final int CONFIRM_WIDTH = 264;
-	private static final int CONFIRM_HEIGHT = 92;
-	private static final int CONFIRM_BUTTON_HEIGHT = 24;
-	private static final int CONFIRM_PADDING = 10;
 	private static final Map<Integer, String> ACTIVITY_BY_ANIMATION = buildActivityByAnimation();
 
 	@Inject
@@ -134,9 +119,6 @@ public class ClanPositionService
 	private ChatIconManager chatIconManager;
 
 	@Inject
-	private WorldService worldService;
-
-	@Inject
 	private ConfigManager configManager;
 
 	private volatile boolean active = false;
@@ -153,8 +135,6 @@ public class ClanPositionService
 	private String lastSentActivity = "";
 	private long lastSentAtMs;
 	private int tickCounter = 0;
-	private int displaySwitcherAttempts = 0;
-	private World quickHopTargetWorld;
 	private boolean finderExpanded = false;
 	private final Map<String, ClanMemberWorldMapPoint> trackedPoints = new HashMap<>();
 
@@ -172,8 +152,6 @@ public class ClanPositionService
 	private int layerFocusWaitTicks;
 	private int layerFocusTotalTicks;
 	private boolean layerFocusScanLogged;
-	// Confirmation prompt shown before a world hop, so an accidental marker click doesn't hop.
-	private ClanMemberWorldMapPoint pendingHopPoint;
 	// Persisted cache: world map region id -> map list entry name that contains it. Lets a
 	// previously resolved layer become a single clean switch instead of a full scan.
 	private final Map<Integer, String> layerMapNameByRegion = new HashMap<>();
@@ -197,9 +175,7 @@ public class ClanPositionService
 		active = false;
 		finderExpanded = false;
 		cancelLayerFocus();
-		clearHopPrompt();
 		disconnectPositionSocket();
-		resetQuickHopper();
 		clientThread.invokeLater(this::clearPoints);
 	}
 
@@ -209,8 +185,6 @@ public class ClanPositionService
 		{
 			return;
 		}
-
-		continueWorldHop();
 
 		if (++tickCounter < TICKS_PER_UPDATE)
 		{
@@ -281,80 +255,6 @@ public class ClanPositionService
 		}
 	}
 
-	public void addHopMenuEntry(MenuEntryAdded event)
-	{
-		if (!active || event == null || !"Focus on".equals(event.getOption()))
-		{
-			return;
-		}
-
-		rewriteHopMenuEntry(event.getMenuEntry());
-	}
-
-	public void rewriteHopMenuEntries()
-	{
-		if (!active)
-		{
-			return;
-		}
-
-		final MenuEntry[] entries = client.getMenuEntries();
-		if (entries == null || entries.length == 0)
-		{
-			return;
-		}
-
-		final List<MenuEntry> keptEntries = new ArrayList<>(entries.length);
-		boolean changed = false;
-		for (MenuEntry entry : entries)
-		{
-			final boolean focusEntry = entry != null && "Focus on".equals(entry.getOption());
-			final MenuEntry rewrittenEntry = rewriteHopMenuEntry(entry);
-			if (rewrittenEntry == null)
-			{
-				changed = true;
-				continue;
-			}
-			if (focusEntry && !"Focus on".equals(rewrittenEntry.getOption()))
-			{
-				changed = true;
-			}
-			keptEntries.add(rewrittenEntry);
-		}
-
-		if (changed)
-		{
-			client.setMenuEntries(keptEntries.toArray(new MenuEntry[0]));
-		}
-	}
-
-	private MenuEntry rewriteHopMenuEntry(MenuEntry entry)
-	{
-		if (entry == null || !"Focus on".equals(entry.getOption()))
-		{
-			return entry;
-		}
-
-		final String target = Text.removeTags(entry.getTarget());
-		final ClanMemberWorldMapPoint point = trackedPoints.get(playerKey(target));
-		if (point == null)
-		{
-			return entry;
-		}
-
-		if (point.getWorld() <= 0 || point.getWorld() == client.getWorld())
-		{
-			return null;
-		}
-
-		return entry
-			.setOption("Hop-to")
-			.setTarget(entry.getTarget())
-			.setType(MenuAction.RUNELITE)
-			.setForceLeftClick(true)
-			.onClick(menuEntry -> hopTo(point));
-	}
-
 	public void addHoveredMapMenuEntry()
 	{
 		if (!active || client.isMenuOpen())
@@ -364,13 +264,7 @@ public class ClanPositionService
 
 		final Point mouse = client.getMouseCanvasPosition();
 
-		// While the hop confirmation is showing only its buttons are interactive, and while a layer
-		// scan is running the map isn't clickable at all.
-		if (pendingHopPoint != null)
-		{
-			addHopConfirmMenuEntries(mouse);
-			return;
-		}
+		// While a layer scan is running the map isn't clickable.
 		if (layerFocusPhase != null)
 		{
 			return;
@@ -379,21 +273,7 @@ public class ClanPositionService
 		if (isMouseOverFinder(mouse))
 		{
 			addFinderMenuEntries();
-			return;
 		}
-
-		final ClanMemberWorldMapPoint point = hoveredPoint();
-		if (point == null || point.getWorld() <= 0 || point.getWorld() == client.getWorld() || hasHopMenuEntry(point))
-		{
-			return;
-		}
-
-		client.createMenuEntry(-1)
-			.setOption("Hop-to")
-			.setTarget(point.getMemberName())
-			.setType(MenuAction.RUNELITE)
-			.setForceLeftClick(true)
-			.onClick(entry -> hopTo(point));
 	}
 
 	public void renderMapFinder(Graphics2D graphics)
@@ -454,118 +334,6 @@ public class ClanPositionService
 		}
 	}
 
-	// Prompt shown before hopping worlds, so an accidental marker click can't world-hop you.
-	public void renderHopConfirmPrompt(Graphics2D graphics)
-	{
-		if (!active || graphics == null || pendingHopPoint == null || layerFocusPhase != null)
-		{
-			return;
-		}
-
-		final Rectangle mapBounds = worldMapViewBounds();
-		if (mapBounds == null)
-		{
-			clearHopPrompt();
-			return;
-		}
-
-		final String name = hasText(pendingHopPoint.getMemberName()) ? pendingHopPoint.getMemberName() : "Clanmate";
-		drawConfirmPanel(graphics, confirmPanelBounds(mapBounds),
-			"Hop to " + name + "?", "Quick-hop to World " + pendingHopPoint.getWorld() + "?", "Hop");
-	}
-
-	// Shared drawing for the two confirmation prompts: a centered panel with two text lines and a
-	// left "confirm" button (labelled per caller) plus a right "Cancel" button.
-	private void drawConfirmPanel(Graphics2D graphics, Rectangle panel, String line1, String line2, String confirmLabel)
-	{
-		graphics.setColor(FINDER_BACKGROUND);
-		graphics.fillRoundRect(panel.x, panel.y, panel.width, panel.height, 8, 8);
-		graphics.setColor(FINDER_BORDER);
-		graphics.drawRoundRect(panel.x, panel.y, panel.width, panel.height, 8, 8);
-
-		final FontMetrics metrics = graphics.getFontMetrics();
-		graphics.setColor(FINDER_TEXT);
-		graphics.drawString(fitText(line1, metrics, panel.width - CONFIRM_PADDING * 2),
-			panel.x + CONFIRM_PADDING, panel.y + CONFIRM_PADDING + metrics.getAscent());
-		graphics.setColor(FINDER_MUTED_TEXT);
-		graphics.drawString(fitText(line2, metrics, panel.width - CONFIRM_PADDING * 2),
-			panel.x + CONFIRM_PADDING, panel.y + CONFIRM_PADDING + metrics.getHeight() + metrics.getAscent());
-
-		final Point mouse = client.getMouseCanvasPosition();
-		drawConfirmButton(graphics, confirmSearchBounds(panel), confirmLabel, mouse, true);
-		drawConfirmButton(graphics, confirmCancelBounds(panel), "Cancel", mouse, false);
-	}
-
-	private void drawConfirmButton(Graphics2D graphics, Rectangle bounds, String label, Point mouse, boolean accent)
-	{
-		final boolean hovered = contains(bounds, mouse);
-		graphics.setColor(hovered ? FINDER_HOVER_BACKGROUND : FINDER_BUTTON_BACKGROUND);
-		graphics.fillRoundRect(bounds.x, bounds.y, bounds.width, bounds.height, 6, 6);
-		graphics.setColor(accent ? FINDER_ACCENT : FINDER_BORDER);
-		graphics.drawRoundRect(bounds.x, bounds.y, bounds.width, bounds.height, 6, 6);
-
-		final FontMetrics metrics = graphics.getFontMetrics();
-		graphics.setColor(accent ? FINDER_ACCENT : FINDER_TEXT);
-		graphics.drawString(label, bounds.x + (bounds.width - metrics.stringWidth(label)) / 2,
-			bounds.y + (bounds.height - metrics.getHeight()) / 2 + metrics.getAscent());
-	}
-
-	private void addHopConfirmMenuEntries(Point mouse)
-	{
-		if (pendingHopPoint == null)
-		{
-			return;
-		}
-
-		final Rectangle mapBounds = worldMapViewBounds();
-		if (mapBounds == null)
-		{
-			return;
-		}
-
-		final Rectangle panel = confirmPanelBounds(mapBounds);
-		if (contains(confirmSearchBounds(panel), mouse))
-		{
-			client.createMenuEntry(-1)
-				.setOption("Hop")
-				.setTarget(hasText(pendingHopPoint.getMemberName()) ? pendingHopPoint.getMemberName() : "")
-				.setType(MenuAction.RUNELITE)
-				.setForceLeftClick(true)
-				.onClick(entry -> confirmHop());
-		}
-		else if (contains(confirmCancelBounds(panel), mouse))
-		{
-			client.createMenuEntry(-1)
-				.setOption("Cancel")
-				.setTarget("")
-				.setType(MenuAction.RUNELITE)
-				.setForceLeftClick(true)
-				.onClick(entry -> clearHopPrompt());
-		}
-	}
-
-	private Rectangle confirmPanelBounds(Rectangle mapBounds)
-	{
-		final int width = Math.min(CONFIRM_WIDTH, mapBounds.width - 20);
-		final int x = mapBounds.x + (mapBounds.width - width) / 2;
-		final int y = mapBounds.y + (mapBounds.height - CONFIRM_HEIGHT) / 2;
-		return new Rectangle(x, y, width, CONFIRM_HEIGHT);
-	}
-
-	private static Rectangle confirmSearchBounds(Rectangle panel)
-	{
-		final int width = (panel.width - CONFIRM_PADDING * 3) / 2;
-		return new Rectangle(panel.x + CONFIRM_PADDING,
-			panel.y + panel.height - CONFIRM_BUTTON_HEIGHT - CONFIRM_PADDING, width, CONFIRM_BUTTON_HEIGHT);
-	}
-
-	private static Rectangle confirmCancelBounds(Rectangle panel)
-	{
-		final int width = (panel.width - CONFIRM_PADDING * 3) / 2;
-		return new Rectangle(panel.x + panel.width - CONFIRM_PADDING - width,
-			panel.y + panel.height - CONFIRM_BUTTON_HEIGHT - CONFIRM_PADDING, width, CONFIRM_BUTTON_HEIGHT);
-	}
-
 	public void clearPoints()
 	{
 		for (ClanMemberWorldMapPoint point : trackedPoints.values())
@@ -574,7 +342,6 @@ public class ClanPositionService
 		}
 		trackedPoints.clear();
 		finderExpanded = false;
-		clearHopPrompt();
 		cancelLayerFocus();
 	}
 
@@ -1441,217 +1208,6 @@ public class ClanPositionService
 			}
 		}
 		return null;
-	}
-
-	private void hopTo(ClanMemberWorldMapPoint point)
-	{
-		// Don't hop straight away - it's easy to click a marker by accident. Show a confirmation
-		// prompt on the map first; the actual hop only happens once the user clicks "Hop".
-		pendingHopPoint = point;
-	}
-
-	private void confirmHop()
-	{
-		final ClanMemberWorldMapPoint point = pendingHopPoint;
-		clearHopPrompt();
-		if (point != null)
-		{
-			final int worldId = point.getWorld();
-			clientThread.invoke(() -> startWorldHop(worldId));
-		}
-	}
-
-	private void clearHopPrompt()
-	{
-		pendingHopPoint = null;
-	}
-
-	private void startWorldHop(int worldId)
-	{
-		if (worldId <= 0 || worldId == client.getWorld())
-		{
-			return;
-		}
-
-		final World world = worldById(worldId);
-		if (world == null)
-		{
-			client.addChatMessage(ChatMessageType.GAMEMESSAGE, "", "Could not find world " + worldId + " in the world list.", null);
-			return;
-		}
-
-		if (client.getGameState() == GameState.LOGIN_SCREEN)
-		{
-			client.changeWorld(world);
-			return;
-		}
-
-		client.addChatMessage(ChatMessageType.CONSOLE, "", "Quick-hopping to World " + worldId + "..", null);
-		quickHopTargetWorld = world;
-		displaySwitcherAttempts = 0;
-	}
-
-	private void continueWorldHop()
-	{
-		if (quickHopTargetWorld == null)
-		{
-			return;
-		}
-
-		if (client.getWidget(ComponentID.WORLD_SWITCHER_WORLD_LIST) == null)
-		{
-			client.openWorldHopper();
-			if (++displaySwitcherAttempts >= MAX_HOP_ATTEMPTS)
-			{
-				client.addChatMessage(ChatMessageType.CONSOLE, "", "Failed to quick-hop after " + displaySwitcherAttempts + " attempts.", null);
-				resetQuickHopper();
-			}
-			return;
-		}
-
-		client.hopToWorld(quickHopTargetWorld);
-		resetQuickHopper();
-	}
-
-	private void resetQuickHopper()
-	{
-		displaySwitcherAttempts = 0;
-		quickHopTargetWorld = null;
-	}
-
-	private ClanMemberWorldMapPoint hoveredPoint()
-	{
-		final Point mouse = client.getMouseCanvasPosition();
-		if (mouse == null)
-		{
-			return null;
-		}
-
-		for (ClanMemberWorldMapPoint point : trackedPoints.values())
-		{
-			final BufferedImage image = point.getImage();
-			final Point mapPoint = mapWorldPointToGraphicsPoint(point.getWorldPoint());
-			if (image == null || mapPoint == null)
-			{
-				continue;
-			}
-
-			final Point imagePoint = point.getImagePoint();
-			final int imageX = imagePoint == null ? mapPoint.getX() - image.getWidth() / 2 : mapPoint.getX() - imagePoint.getX();
-			final int imageY = imagePoint == null ? mapPoint.getY() - image.getHeight() / 2 : mapPoint.getY() - imagePoint.getY();
-
-			final Rectangle bounds = new Rectangle(
-				imageX,
-				imageY,
-				image.getWidth(),
-				image.getHeight());
-			bounds.grow(MAP_MARKER_HOVER_PADDING, MAP_MARKER_HOVER_PADDING);
-			if (bounds.contains(mouse.getX(), mouse.getY()))
-			{
-				return point;
-			}
-		}
-		return null;
-	}
-
-	private Point mapWorldPointToGraphicsPoint(WorldPoint worldPoint)
-	{
-		final WorldMap worldMap = client.getWorldMap();
-		final Widget map = client.getWidget(ComponentID.WORLD_MAP_MAPVIEW);
-		if (worldMap == null || worldMap.getWorldMapData() == null || map == null || map.isHidden()
-			|| !worldMap.getWorldMapData().surfaceContainsPosition(worldPoint.getX(), worldPoint.getY()))
-		{
-			return null;
-		}
-
-		final float zoom = worldMap.getWorldMapZoom();
-		if (zoom <= 0)
-		{
-			return null;
-		}
-
-		final Rectangle bounds = map.getBounds();
-		final Point mapPosition = worldMap.getWorldMapPosition();
-		if (bounds == null || mapPosition == null)
-		{
-			return null;
-		}
-
-		final int widthInTiles = (int) Math.ceil(bounds.getWidth() / zoom);
-		final int heightInTiles = (int) Math.ceil(bounds.getHeight() / zoom);
-
-		final int yTileMax = mapPosition.getY() - heightInTiles / 2;
-		final int xTileOffset = worldPoint.getX() + widthInTiles / 2 - mapPosition.getX();
-		final int yTileOffset = (yTileMax - worldPoint.getY() - 1) * -1;
-		final int halfZoom = (int) Math.ceil(zoom / 2.0f);
-
-		final int x = (int) (xTileOffset * zoom + zoom - halfZoom) + (int) bounds.getX();
-		final int y = bounds.height - (int) (yTileOffset * zoom - zoom - halfZoom) + (int) bounds.getY();
-		return new Point(x, y);
-	}
-
-	private boolean hasHopMenuEntry(ClanMemberWorldMapPoint point)
-	{
-		final MenuEntry[] entries = client.getMenuEntries();
-		if (entries == null)
-		{
-			return false;
-		}
-
-		final String key = playerKey(point.getMemberName());
-		for (MenuEntry entry : entries)
-		{
-			if (entry != null && ("Hop-to".equals(entry.getOption()) || "Hop to".equals(entry.getOption()) || "Focus on".equals(entry.getOption()))
-				&& key.equals(playerKey(Text.removeTags(entry.getTarget()))))
-			{
-				return true;
-			}
-		}
-		return false;
-	}
-
-	private World worldById(int worldId)
-	{
-		final World[] worlds = client.getWorldList();
-		if (worlds != null)
-		{
-			for (World world : worlds)
-			{
-				if (world != null && world.getId() == worldId)
-				{
-					return world;
-				}
-			}
-		}
-
-		final WorldResult worldResult = worldService.getWorlds();
-		final net.runelite.http.api.worlds.World serviceWorld = worldResult == null ? null : worldResult.findWorld(worldId);
-		if (serviceWorld != null)
-		{
-			return createWorld(serviceWorld.getId(), serviceWorld.getAddress(), serviceWorld.getActivity(), serviceWorld.getLocation(),
-				serviceWorld.getPlayers(), WorldUtil.toWorldTypes(serviceWorld.getTypes()));
-		}
-
-		final World world = client.createWorld();
-		world.setId(worldId);
-		world.setAddress("oldschool" + worldId + ".runescape.com");
-		world.setActivity("");
-		world.setLocation(0);
-		world.setPlayerCount(0);
-		world.setTypes(EnumSet.noneOf(WorldType.class));
-		return world;
-	}
-
-	private World createWorld(int id, String address, String activity, int location, int playerCount, EnumSet<WorldType> types)
-	{
-		final World world = client.createWorld();
-		world.setId(id);
-		world.setAddress(address);
-		world.setActivity(activity == null ? "" : activity);
-		world.setLocation(location);
-		world.setPlayerCount(playerCount);
-		world.setTypes(types == null ? EnumSet.noneOf(WorldType.class) : types);
-		return world;
 	}
 
 	private String currentPlayerActivity(Player localPlayer, int worldId)
