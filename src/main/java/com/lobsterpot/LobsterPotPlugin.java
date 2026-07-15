@@ -254,7 +254,7 @@ public class LobsterPotPlugin extends Plugin
 		final String rsn = access == null ? null : access.getPlayerName();
 		if (access == null || !access.isAllowed() || rsn == null || rsn.trim().isEmpty())
 		{
-			SwingUtilities.invokeLater(() -> panel.showBountyError("Log in as a LobsterPot member to submit."));
+			SwingUtilities.invokeLater(() -> panel.markBountyFailed(bountyId, "Log in as a LobsterPot member to submit."));
 			return;
 		}
 
@@ -269,7 +269,7 @@ public class LobsterPotPlugin extends Plugin
 			@Override
 			public void onFailure(String error)
 			{
-				SwingUtilities.invokeLater(() -> panel.showBountyError(error));
+				SwingUtilities.invokeLater(() -> panel.markBountyFailed(bountyId, error));
 			}
 		});
 	}

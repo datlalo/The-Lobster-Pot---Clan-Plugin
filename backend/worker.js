@@ -284,7 +284,7 @@ export class BountyRoom extends DurableObject {
 		this.sql.exec('CREATE INDEX IF NOT EXISTS idx_submissions_lookup ON submissions (rsn_key, bounty_id, status)');
 	}
 
-	submit({ rsnKey, rsn, bountyId, note }) {
+	submit({ rsnKey, rsn, bountyId, note, rejectedInFeed }) {
 		const now = Date.now();
 
 		const recent = this.sql
@@ -294,15 +294,27 @@ export class BountyRoom extends DurableObject {
 			return { code: 429, status: 'rate_limited' };
 		}
 
-		const existing = this.sql
-			.exec(
-				"SELECT id FROM submissions WHERE rsn_key = ? AND bounty_id = ? AND status IN ('pending', 'consumed') LIMIT 1",
-				rsnKey,
-				bountyId
-			)
+		// A pending row (queued, awaiting bot pickup) always blocks - this is the core dedup and also
+		// stops a rapid re-click from churning the queue while the feed is still stale.
+		const pending = this.sql
+			.exec("SELECT id FROM submissions WHERE rsn_key = ? AND bounty_id = ? AND status = 'pending' LIMIT 1", rsnKey, bountyId)
 			.toArray();
-		if (existing.length > 0) {
+		if (pending.length > 0) {
 			return { code: 409, status: 'already_submitted' };
+		}
+
+		// A consumed row means the bot picked this claim up and it's awaiting an admin decision, so we
+		// normally block re-submission. Exception: if the feed shows this member's last claim for this
+		// bounty was rejected, the claim is decided - clear the stale row so a retry is queued fresh.
+		// (The bot's /bounty/reset does the same thing explicitly; this makes retries self-healing.)
+		const consumed = this.sql
+			.exec("SELECT id FROM submissions WHERE rsn_key = ? AND bounty_id = ? AND status = 'consumed' LIMIT 1", rsnKey, bountyId)
+			.toArray();
+		if (consumed.length > 0) {
+			if (!rejectedInFeed) {
+				return { code: 409, status: 'already_submitted' };
+			}
+			this.sql.exec("DELETE FROM submissions WHERE rsn_key = ? AND bounty_id = ? AND status = 'consumed'", rsnKey, bountyId);
 		}
 
 		this.sql.exec(
@@ -352,6 +364,18 @@ export class BountyRoom extends DurableObject {
 		this.sql.exec("DELETE FROM submissions WHERE status = 'consumed' AND consumed_at < ?", now - BOUNTY_RETENTION_MS);
 		return { consumed };
 	}
+
+	// Clears a member's submissions for one bounty so they can claim it again. The bot calls this
+	// when a claim is rejected (re-enabling a retry) without weakening dedup for undecided claims.
+	reset(rsnKey, bountyId) {
+		const cleared = this.sql
+			.exec('SELECT COUNT(*) AS n FROM submissions WHERE rsn_key = ? AND bounty_id = ?', rsnKey, bountyId)
+			.toArray()[0].n;
+		if (cleared > 0) {
+			this.sql.exec('DELETE FROM submissions WHERE rsn_key = ? AND bounty_id = ?', rsnKey, bountyId);
+		}
+		return { cleared };
+	}
 }
 
 export default {
@@ -379,6 +403,10 @@ export default {
 			return handleBountyAck(request, env);
 		}
 
+		if (url.pathname === '/bounty/reset' && request.method === 'POST') {
+			return handleBountyReset(request, env);
+		}
+
 		if (url.pathname === '/health') {
 			return corsResponse(new Response('OK', { status: 200 }));
 		}
@@ -401,9 +429,9 @@ async function handleBountySubmit(request, env) {
 	const key = memberKey(data.rsn);
 	let memberKeys;
 	let bountyIds;
+	let rejectedIds;
 	try {
-		memberKeys = await clanMemberKeys();
-		bountyIds = await activeBountyIds();
+		[memberKeys, bountyIds, rejectedIds] = await Promise.all([clanMemberKeys(), activeBountyIds(), rejectedBountyIdsFor(key)]);
 	} catch {
 		return jsonResponse(503, { status: 'unavailable', message: 'Clan feed unavailable.' });
 	}
@@ -420,6 +448,7 @@ async function handleBountySubmit(request, env) {
 		rsn: String(data.rsn).trim(),
 		bountyId: data.bountyId,
 		note: cleanNote(data.note),
+		rejectedInFeed: rejectedIds.has(data.bountyId),
 	});
 	return jsonResponse(result.code, { status: result.status });
 }
@@ -446,6 +475,24 @@ async function handleBountyAck(request, env) {
 	const id = env.BOUNTY_ROOM.idFromName('lobsterpot');
 	const result = await env.BOUNTY_ROOM.get(id).ack(data && data.ids);
 	return jsonResponse(200, { consumed: result.consumed });
+}
+
+async function handleBountyReset(request, env) {
+	if (!requireBotAuth(request, env)) {
+		return jsonResponse(401, { status: 'unauthorized' });
+	}
+	let data;
+	try {
+		data = await request.json();
+	} catch {
+		return jsonResponse(400, { status: 'bad_request' });
+	}
+	if (!data || typeof data.rsn !== 'string' || typeof data.bountyId !== 'string') {
+		return jsonResponse(400, { status: 'bad_request', message: 'rsn and bountyId are required.' });
+	}
+	const id = env.BOUNTY_ROOM.idFromName('lobsterpot');
+	const result = await env.BOUNTY_ROOM.get(id).reset(memberKey(data.rsn), data.bountyId);
+	return jsonResponse(200, { cleared: result.cleared });
 }
 
 async function clanMemberKeys() {
@@ -503,6 +550,40 @@ async function activeBountyIds() {
 	}
 
 	bountyCache = { expiresAt: now + MEMBER_CACHE_MS, ids };
+	return ids;
+}
+
+// The set of bounty IDs whose latest claim for this member is currently rejected in the feed. Used
+// to re-enable a retry: submit() clears the stale consumed row for a rejected bounty. Reads the feed
+// fresh (edge-cached ~60s) rather than the membership cache so a just-rejected claim is seen quickly.
+async function rejectedBountyIdsFor(rsnKey) {
+	const response = await fetch(MEMBER_FEED_URL, {
+		headers: { Accept: 'application/json' },
+		cf: { cacheTtl: 60 },
+	});
+	if (!response.ok) {
+		throw new Error(`Member feed failed: ${response.status}`);
+	}
+
+	const feed = await response.json();
+	const ids = new Set();
+	for (const member of feed.members || []) {
+		const keys = [];
+		if (member.rsn) {
+			keys.push(memberKey(member.rsn));
+		}
+		if (member.rsn_key) {
+			keys.push(memberKey(member.rsn_key));
+		}
+		if (!keys.includes(rsnKey)) {
+			continue;
+		}
+		for (const pending of member.pending_bounties || []) {
+			if (pending && typeof pending.bounty_id === 'string' && String(pending.status || '').toLowerCase() === 'rejected') {
+				ids.add(pending.bounty_id);
+			}
+		}
+	}
 	return ids;
 }
 

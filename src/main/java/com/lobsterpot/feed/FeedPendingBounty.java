@@ -9,6 +9,7 @@ public class FeedPendingBounty
 
 	private String name;
 	private String status;
+	private String reason;
 
 	@SerializedName("created_at")
 	private String createdAt;
@@ -26,6 +27,11 @@ public class FeedPendingBounty
 	public String getStatus()
 	{
 		return status;
+	}
+
+	public String getReason()
+	{
+		return reason;
 	}
 
 	public String getCreatedAt()

@@ -10,6 +10,7 @@ import com.lobsterpot.feed.FeedNextRank;
 import com.lobsterpot.feed.FeedPendingBounty;
 import com.lobsterpot.feed.FeedPendingClaim;
 import com.lobsterpot.feed.PluginFeed;
+import com.lobsterpot.feed.PointHistoryEntry;
 import com.lobsterpot.requirements.RankRequirementEvaluation;
 import java.awt.BorderLayout;
 import java.awt.Color;
@@ -24,9 +25,11 @@ import java.time.OffsetDateTime;
 import java.time.ZoneId;
 import java.time.temporal.ChronoUnit;
 import java.time.format.DateTimeFormatter;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.function.BiConsumer;
 import javax.inject.Inject;
@@ -44,6 +47,8 @@ import javax.swing.SwingConstants;
 import net.runelite.client.ui.ColorScheme;
 import net.runelite.client.ui.FontManager;
 import net.runelite.client.ui.PluginPanel;
+import net.runelite.client.ui.components.materialtabs.MaterialTab;
+import net.runelite.client.ui.components.materialtabs.MaterialTabGroup;
 import net.runelite.client.ui.laf.RuneLiteScrollBarUI;
 
 @Singleton
@@ -67,7 +72,6 @@ public class LobsterPotPanel extends PluginPanel
 	private static final DateTimeFormatter DATE_TIME_FORMAT =
 		DateTimeFormatter.ofPattern("EEE d MMM, HH:mm").withZone(ZoneId.systemDefault());
 
-	private final JPanel scrollContent = new ScrollableContentPanel();
 	private final JLabel title = new JLabel();
 	private final JLabel accessStatus = new JLabel();
 	private final JLabel playerSummary = field();
@@ -85,11 +89,24 @@ public class LobsterPotPanel extends PluginPanel
 	private final JPanel detailsContent = new JPanel();
 	private final JLabel detailsStatus = mutedLabel();
 	private final JPanel detailsList = new JPanel();
+	// Profile tab
+	private final JLabel profileStatus = mutedLabel();
+	private final JPanel profileList = new JPanel();
+	private final JLabel pointHistoryStatus = mutedLabel();
+	private final JPanel pointHistoryList = new JPanel();
+	// Bounties tab (claim list + claim history); Overview keeps its own bounty section above.
+	private final JLabel bountyClaimStatus = mutedLabel();
+	private final JPanel bountyClaimList = new JPanel();
+	private final JLabel bountyHistoryStatus = mutedLabel();
+	private final JPanel bountyHistoryList = new JPanel();
 	private final JButton refresh = new JButton("Refresh");
 
 	private Runnable refreshAction = () -> {};
 	private BiConsumer<String, String> submitAction = (bountyId, note) -> {};
-	private final Set<String> locallySubmitted = new HashSet<>();
+	// bountyId -> epoch millis of an optimistic "just submitted" that the feed may not reflect yet.
+	// Honored only until a feed generated after this time arrives, then the feed status takes over.
+	private final Map<String, Long> locallySubmitted = new HashMap<>();
+	private final Set<String> inFlightBounties = new HashSet<>();
 	private boolean bountiesEnabled = true;
 	private String bountyActionMessage;
 	private String currentPlayerName;
@@ -116,23 +133,48 @@ public class LobsterPotPanel extends PluginPanel
 		setLayout(new BorderLayout());
 		setBackground(ColorScheme.DARK_GRAY_COLOR);
 
-		scrollContent.removeAll();
-		scrollContent.setBackground(ColorScheme.DARK_GRAY_COLOR);
-		scrollContent.setBorder(BorderFactory.createEmptyBorder(8, 8, 8, 14));
-
-		final JPanel main = new JPanel();
-		main.setLayout(new BoxLayout(main, BoxLayout.Y_AXIS));
-		main.setOpaque(false);
-		main.setAlignmentX(Component.LEFT_ALIGNMENT);
-		scrollContent.add(main, BorderLayout.NORTH);
+		// Persistent header (title + access), shown above the tabs on every tab.
+		final JPanel north = new JPanel();
+		north.setLayout(new BoxLayout(north, BoxLayout.Y_AXIS));
+		north.setBackground(ColorScheme.DARK_GRAY_COLOR);
+		north.setBorder(BorderFactory.createEmptyBorder(8, 8, 0, 8));
 
 		title.setFont(FontManager.getRunescapeBoldFont());
 		title.setAlignmentX(Component.LEFT_ALIGNMENT);
-		main.add(title);
-		main.add(verticalGap(8));
+		north.add(title);
+		north.add(verticalGap(8));
+		north.add(buildHeaderCard());
+		north.add(verticalGap(8));
 
-		main.add(buildHeaderCard());
-		main.add(verticalGap(10));
+		// Tab strip drives which content shows in the display area.
+		final JPanel display = new JPanel(new BorderLayout());
+		display.setBackground(ColorScheme.DARK_GRAY_COLOR);
+		final MaterialTabGroup tabGroup = new MaterialTabGroup(display);
+		tabGroup.setLayout(new GridLayout(1, 3, 6, 0));
+		tabGroup.setAlignmentX(Component.LEFT_ALIGNMENT);
+		tabGroup.setBorder(BorderFactory.createEmptyBorder(0, 0, 6, 0));
+
+		final MaterialTab overviewTab = new MaterialTab("Overview", tabGroup, buildOverviewTab());
+		final MaterialTab profileTab = new MaterialTab("Profile", tabGroup, buildProfileTab());
+		final MaterialTab bountiesTab = new MaterialTab("Bounties", tabGroup, buildBountiesTab());
+		tabGroup.addTab(overviewTab);
+		tabGroup.addTab(profileTab);
+		tabGroup.addTab(bountiesTab);
+		north.add(tabGroup);
+
+		add(north, BorderLayout.NORTH);
+		add(display, BorderLayout.CENTER);
+		add(buildRefreshBar(), BorderLayout.SOUTH);
+
+		tabGroup.select(overviewTab);
+
+		setDetailsExpanded(false);
+		setChecking();
+	}
+
+	private JScrollPane buildOverviewTab()
+	{
+		final JPanel main = tabColumn();
 		main.add(buildNextRankSection(false));
 		main.add(verticalGap(10));
 		main.add(buildBroadcastsSection());
@@ -142,10 +184,84 @@ public class LobsterPotPanel extends PluginPanel
 		main.add(buildBountiesSection());
 		main.add(verticalGap(10));
 		main.add(buildDetailsSection());
-		main.add(verticalGap(10));
-		main.add(buildRefreshButton());
+		return scrollPane(main);
+	}
 
-		final JScrollPane scrollPane = new JScrollPane(scrollContent,
+	private JScrollPane buildProfileTab()
+	{
+		final JPanel main = tabColumn();
+		final JPanel stats = section("Profile");
+		stats.add(profileStatus);
+		listPanel(profileList);
+		stats.add(profileList);
+		main.add(stats);
+		main.add(verticalGap(10));
+
+		final JPanel history = section("Point history");
+		history.add(pointHistoryStatus);
+		listPanel(pointHistoryList);
+		history.add(pointHistoryList);
+		main.add(history);
+		return scrollPane(main);
+	}
+
+	private JScrollPane buildBountiesTab()
+	{
+		final JPanel main = tabColumn();
+		final JPanel claim = section("Bounties");
+		claim.add(bountyClaimStatus);
+		listPanel(bountyClaimList);
+		claim.add(bountyClaimList);
+		main.add(claim);
+		main.add(verticalGap(10));
+
+		final JPanel history = section("Claim history");
+		history.add(bountyHistoryStatus);
+		listPanel(bountyHistoryList);
+		history.add(bountyHistoryList);
+		main.add(history);
+		return scrollPane(main);
+	}
+
+	private JPanel buildRefreshBar()
+	{
+		final JPanel bar = new JPanel(new BorderLayout());
+		bar.setBackground(ColorScheme.DARK_GRAY_COLOR);
+		bar.setBorder(BorderFactory.createEmptyBorder(6, 8, 8, 8));
+		refresh.setHorizontalAlignment(SwingConstants.CENTER);
+		for (ActionListener listener : refresh.getActionListeners())
+		{
+			refresh.removeActionListener(listener);
+		}
+		refresh.addActionListener(e -> this.refreshAction.run());
+		bar.add(refresh, BorderLayout.CENTER);
+		return bar;
+	}
+
+	private static JPanel tabColumn()
+	{
+		final JPanel main = new JPanel();
+		main.setLayout(new BoxLayout(main, BoxLayout.Y_AXIS));
+		main.setOpaque(false);
+		main.setAlignmentX(Component.LEFT_ALIGNMENT);
+		return main;
+	}
+
+	private static void listPanel(JPanel panel)
+	{
+		panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
+		panel.setOpaque(false);
+		panel.setAlignmentX(Component.LEFT_ALIGNMENT);
+	}
+
+	private static JScrollPane scrollPane(JPanel main)
+	{
+		final JPanel content = new ScrollableContentPanel();
+		content.setBackground(ColorScheme.DARK_GRAY_COLOR);
+		content.setBorder(BorderFactory.createEmptyBorder(0, 8, 8, 14));
+		content.add(main, BorderLayout.NORTH);
+
+		final JScrollPane scrollPane = new JScrollPane(content,
 			JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED, JScrollPane.HORIZONTAL_SCROLLBAR_NEVER);
 		scrollPane.setBackground(ColorScheme.DARK_GRAY_COLOR);
 		scrollPane.getViewport().setBackground(ColorScheme.DARK_GRAY_COLOR);
@@ -153,10 +269,7 @@ public class LobsterPotPanel extends PluginPanel
 		scrollPane.getVerticalScrollBar().setUI(new RuneLiteScrollBarUI());
 		scrollPane.getVerticalScrollBar().setPreferredSize(new Dimension(9, 0));
 		scrollPane.getVerticalScrollBar().setUnitIncrement(16);
-		add(scrollPane, BorderLayout.CENTER);
-
-		setDetailsExpanded(false);
-		setChecking();
+		return scrollPane;
 	}
 
 	public void render(ClanAccess access)
@@ -179,6 +292,7 @@ public class LobsterPotPanel extends PluginPanel
 		}
 		updateHeader();
 		showProfile();
+		showProfileDetails();
 
 		revalidate();
 		repaint();
@@ -194,6 +308,8 @@ public class LobsterPotPanel extends PluginPanel
 		setBroadcastsMessage("Loading broadcasts...");
 		setEventsMessage("Loading events...");
 		setBountiesMessage("Loading bounties...");
+		setListMessage(profileList, profileStatus, "Loading profile...");
+		setListMessage(pointHistoryList, pointHistoryStatus, "Loading point history...");
 	}
 
 	public void clearFeed(String message)
@@ -206,6 +322,8 @@ public class LobsterPotPanel extends PluginPanel
 		setBroadcastsMessage(message);
 		setEventsMessage(message);
 		setBountiesMessage(message);
+		setListMessage(profileList, profileStatus, message);
+		setListMessage(pointHistoryList, pointHistoryStatus, message);
 	}
 
 	public void renderFeed(PluginFeed feed, String error)
@@ -221,6 +339,8 @@ public class LobsterPotPanel extends PluginPanel
 			setBroadcastsMessage(error);
 			setEventsMessage(error);
 			setBountiesMessage(error);
+			setListMessage(profileList, profileStatus, error);
+			setListMessage(pointHistoryList, pointHistoryStatus, error);
 			return;
 		}
 		if (feed == null)
@@ -231,10 +351,13 @@ public class LobsterPotPanel extends PluginPanel
 			setBroadcastsMessage("No feed loaded.");
 			setEventsMessage("No feed loaded.");
 			setBountiesMessage("No feed loaded.");
+			setListMessage(profileList, profileStatus, "No feed loaded.");
+			setListMessage(pointHistoryList, pointHistoryStatus, "No feed loaded.");
 			return;
 		}
 
 		showProfile();
+		showProfileDetails();
 		showBroadcasts(feed.getBroadcasts());
 		showEvents(feed.getEvents());
 		showBounties(feed.getBounties(), findMember(feed, currentPlayerName));
@@ -244,6 +367,7 @@ public class LobsterPotPanel extends PluginPanel
 	{
 		currentRequirementEvaluation = evaluation;
 		showProfile();
+		showProfileDetails();
 	}
 
 	private void setChecking()
@@ -256,6 +380,8 @@ public class LobsterPotPanel extends PluginPanel
 		updateHeader();
 		setNextRankMessage("Log in to view your clan profile.");
 		setDetailsMessage("Log in to view clan details.");
+		showProfileDetails();
+		setBountiesMessage("Log in to view clan bounties.");
 	}
 
 	private JPanel buildHeaderCard()
@@ -350,22 +476,6 @@ public class LobsterPotPanel extends PluginPanel
 		detailsContent.add(detailsList);
 		section.add(detailsContent);
 		return section;
-	}
-
-	private JPanel buildRefreshButton()
-	{
-		final JPanel buttons = new JPanel(new GridLayout(1, 1, 0, 0));
-		buttons.setOpaque(false);
-		buttons.setAlignmentX(Component.LEFT_ALIGNMENT);
-		refresh.setHorizontalAlignment(SwingConstants.CENTER);
-		for (ActionListener listener : refresh.getActionListeners())
-		{
-			refresh.removeActionListener(listener);
-		}
-		refresh.addActionListener(e -> this.refreshAction.run());
-		buttons.setMaximumSize(new Dimension(Integer.MAX_VALUE, refresh.getPreferredSize().height));
-		buttons.add(refresh);
-		return buttons;
 	}
 
 	private void updateHeader()
@@ -637,32 +747,89 @@ public class LobsterPotPanel extends PluginPanel
 
 	private void showBounties(List<FeedBounty> bounties, FeedMember member)
 	{
-		bountyList.removeAll();
+		renderBountySummary(bountyList, bountyStatus, bounties);
+		renderActiveBounties(bountyClaimList, bountyClaimStatus, bounties, member);
+		showBountyHistory(member);
+	}
 
-		if (!bountiesEnabled)
-		{
-			bountySection.setVisible(false);
-			return;
-		}
-		bountySection.setVisible(true);
+	// Overview shows a read-only, at-a-glance list of active bounties; claiming and details live in
+	// the Bounties tab (renderActiveBounties). No note field, submit button, or per-member status here.
+	private void renderBountySummary(JPanel listPanel, JLabel statusLabel, List<FeedBounty> bounties)
+	{
+		listPanel.removeAll();
 
 		if (currentPlayerName == null || currentPlayerName.trim().isEmpty())
 		{
-			setBountiesMessage("Log in to view clan bounties.");
+			setListMessage(listPanel, statusLabel, "Log in to view clan bounties.");
 			return;
 		}
 		if (!currentAccessAllowed)
 		{
-			setBountiesMessage("Available for LobsterPot clan members.");
+			setListMessage(listPanel, statusLabel, "Available for LobsterPot clan members.");
 			return;
 		}
 
-		bountyStatus.setVisible(false);
+		int shown = 0;
+		final JPanel rows = new JPanel();
+		rows.setLayout(new BoxLayout(rows, BoxLayout.Y_AXIS));
+		rows.setOpaque(false);
+		rows.setAlignmentX(Component.LEFT_ALIGNMENT);
+		if (bounties != null)
+		{
+			for (FeedBounty bounty : bounties)
+			{
+				if (bounty == null || !Boolean.TRUE.equals(bounty.getActive()) || !hasText(bounty.getId()))
+				{
+					continue;
+				}
+				rows.add(bountySummaryRow(bounty));
+				rows.add(verticalGap(6));
+				shown++;
+			}
+		}
+
+		if (shown == 0)
+		{
+			setListMessage(listPanel, statusLabel, "No active bounties");
+			return;
+		}
+
+		statusLabel.setVisible(false);
+		listPanel.add(statusLine("Claim bounties and view details in the Bounties tab.", KEY_COLOR));
+		listPanel.add(verticalGap(6));
+		listPanel.add(rows);
+		revalidate();
+		repaint();
+	}
+
+	private JPanel bountySummaryRow(FeedBounty bounty)
+	{
+		final JPanel row = card();
+		row.add(boldLine(valueOrUnknown(bounty.getName()) + pointsSuffix(bounty)));
+		return row;
+	}
+
+	private void renderActiveBounties(JPanel listPanel, JLabel statusLabel, List<FeedBounty> bounties, FeedMember member)
+	{
+		listPanel.removeAll();
+
+		if (currentPlayerName == null || currentPlayerName.trim().isEmpty())
+		{
+			setListMessage(listPanel, statusLabel, "Log in to view clan bounties.");
+			return;
+		}
+		if (!currentAccessAllowed)
+		{
+			setListMessage(listPanel, statusLabel, "Available for LobsterPot clan members.");
+			return;
+		}
+
+		statusLabel.setVisible(false);
 
 		if (hasText(bountyActionMessage))
 		{
-			bountyList.add(wrappedCardLine(bountyActionMessage, WARNING_COLOR));
-			bountyList.add(verticalGap(6));
+			listPanel.add(wrappedCardLine(bountyActionMessage, WARNING_COLOR));
+			listPanel.add(verticalGap(6));
 		}
 
 		int shown = 0;
@@ -674,17 +841,77 @@ public class LobsterPotPanel extends PluginPanel
 				{
 					continue;
 				}
-				bountyList.add(bountyRow(bounty, member));
-				bountyList.add(verticalGap(6));
+				listPanel.add(bountyRow(bounty, member));
+				listPanel.add(verticalGap(6));
 				shown++;
 			}
 		}
 
 		if (shown == 0 && !hasText(bountyActionMessage))
 		{
-			setBountiesMessage("No active bounties");
+			setListMessage(listPanel, statusLabel, "No active bounties");
 			return;
 		}
+		revalidate();
+		repaint();
+	}
+
+	private void showBountyHistory(FeedMember member)
+	{
+		bountyHistoryList.removeAll();
+
+		if (!currentAccessAllowed || member == null)
+		{
+			setListMessage(bountyHistoryList, bountyHistoryStatus, "Your decided bounty claims will show here.");
+			return;
+		}
+
+		bountyHistoryStatus.setVisible(false);
+		int shown = 0;
+		for (FeedPendingBounty pending : member.getPendingBounties())
+		{
+			if (pending == null)
+			{
+				continue;
+			}
+			final String status = pending.getStatus();
+			if (!"approved".equalsIgnoreCase(status) && !"rejected".equalsIgnoreCase(status))
+			{
+				continue;
+			}
+			bountyHistoryList.add(bountyHistoryRow(pending));
+			bountyHistoryList.add(verticalGap(6));
+			shown++;
+		}
+
+		if (shown == 0)
+		{
+			setListMessage(bountyHistoryList, bountyHistoryStatus, "No decided bounty claims yet.");
+			return;
+		}
+		revalidate();
+		repaint();
+	}
+
+	private JPanel bountyHistoryRow(FeedPendingBounty pending)
+	{
+		final JPanel row = card();
+		final boolean approved = "approved".equalsIgnoreCase(pending.getStatus());
+		row.add(boldLine(valueOrUnknown(pending.getName())));
+		row.add(statusLine((approved ? CHECK + " Approved" : CROSS + " Rejected") + pendingDate(pending.getCreatedAt()),
+			approved ? ALLOWED_COLOR : DENIED_COLOR));
+		if (hasText(pending.getReason()))
+		{
+			row.add(wrappedCardLine("Reason: " + pending.getReason().trim(), Color.LIGHT_GRAY));
+		}
+		return row;
+	}
+
+	private void setListMessage(JPanel listPanel, JLabel statusLabel, String message)
+	{
+		listPanel.removeAll();
+		statusLabel.setVisible(true);
+		statusLabel.setText(wrapped(message));
 		revalidate();
 		repaint();
 	}
@@ -698,17 +925,60 @@ public class LobsterPotPanel extends PluginPanel
 			row.add(wrappedCardLine(bounty.getDescription().trim(), Color.LIGHT_GRAY));
 		}
 
-		final String pending = pendingBountyStatus(member, bounty.getId());
-		if (pending != null)
+		// A submission for this bounty is already being sent - don't offer the button again.
+		if (inFlightBounties.contains(bounty.getId()))
 		{
 			row.add(verticalGap(4));
-			row.add(statusLine(pending, WARNING_COLOR));
+			row.add(statusLine("Submitting...", WARNING_COLOR));
 			return row;
 		}
-		if (locallySubmitted.contains(bounty.getId()))
+
+		// Optimistic "just submitted" state bridges feed lag, but only until the feed catches up: a
+		// feed generated after we submitted already reflects the outcome (pending/approved/rejected),
+		// so we drop the optimistic flag and let the feed status below take over.
+		final Long submittedAt = locallySubmitted.get(bounty.getId());
+		if (submittedAt != null)
+		{
+			if (feedReflectsSubmit(submittedAt))
+			{
+				locallySubmitted.remove(bounty.getId());
+			}
+			else
+			{
+				row.add(verticalGap(4));
+				row.add(statusLine("Submitted - pending approval", WARNING_COLOR));
+				return row;
+			}
+		}
+
+		final FeedPendingBounty pending = findPendingBounty(member, bounty.getId());
+		final String status = pending == null ? null : pending.getStatus();
+		if ("approved".equalsIgnoreCase(status))
 		{
 			row.add(verticalGap(4));
-			row.add(statusLine("Submitted - pending approval", WARNING_COLOR));
+			row.add(statusLine(CHECK + " Approved" + pendingDate(pending.getCreatedAt()), ALLOWED_COLOR));
+			return row;
+		}
+		if (pending != null && !"rejected".equalsIgnoreCase(status))
+		{
+			// Awaiting a decision - block another submission until it's decided.
+			row.add(verticalGap(4));
+			row.add(statusLine("Pending approval" + pendingDate(pending.getCreatedAt()), WARNING_COLOR));
+			return row;
+		}
+		if ("rejected".equalsIgnoreCase(status))
+		{
+			// A rejected claim can be retried, so show why and keep the submit control below.
+			row.add(verticalGap(4));
+			row.add(statusLine(CROSS + " Rejected - you can claim again", DENIED_COLOR));
+			if (hasText(pending.getReason()))
+			{
+				row.add(wrappedCardLine("Reason: " + pending.getReason().trim(), Color.LIGHT_GRAY));
+			}
+		}
+
+		if (!bountiesEnabled)
+		{
 			return row;
 		}
 
@@ -725,10 +995,15 @@ public class LobsterPotPanel extends PluginPanel
 		final String bountyId = bounty.getId();
 		submit.addActionListener(e ->
 		{
-			submit.setEnabled(false);
-			submit.setText("Submitting...");
+			// Guard against double-fire (rapid clicks, or the same bounty's button in another tab).
+			if (!inFlightBounties.add(bountyId))
+			{
+				return;
+			}
+			final String note = noteField.getText();
 			bountyActionMessage = null;
-			submitAction.accept(bountyId, noteField.getText());
+			submitAction.accept(bountyId, note);
+			refreshBounties();
 		});
 		row.add(verticalGap(4));
 		row.add(submit);
@@ -740,7 +1015,7 @@ public class LobsterPotPanel extends PluginPanel
 		return bounty.getPoints() == null ? "" : " (" + formatInt(bounty.getPoints()) + " pts)";
 	}
 
-	private static String pendingBountyStatus(FeedMember member, String bountyId)
+	private static FeedPendingBounty findPendingBounty(FeedMember member, String bountyId)
 	{
 		if (member == null || !hasText(bountyId))
 		{
@@ -748,20 +1023,10 @@ public class LobsterPotPanel extends PluginPanel
 		}
 		for (FeedPendingBounty pending : member.getPendingBounties())
 		{
-			if (pending == null || !bountyId.equals(pending.getBountyId()))
+			if (pending != null && bountyId.equals(pending.getBountyId()))
 			{
-				continue;
+				return pending;
 			}
-			final String status = pending.getStatus();
-			if ("approved".equalsIgnoreCase(status))
-			{
-				return CHECK + " Approved" + pendingDate(pending.getCreatedAt());
-			}
-			if ("rejected".equalsIgnoreCase(status))
-			{
-				return CROSS + " Rejected" + pendingDate(pending.getCreatedAt());
-			}
-			return "Pending approval" + pendingDate(pending.getCreatedAt());
 		}
 		return null;
 	}
@@ -783,16 +1048,114 @@ public class LobsterPotPanel extends PluginPanel
 	{
 		if (hasText(bountyId))
 		{
-			locallySubmitted.add(bountyId);
+			locallySubmitted.put(bountyId, System.currentTimeMillis());
+			inFlightBounties.remove(bountyId);
 		}
 		bountyActionMessage = null;
 		refreshBounties();
 	}
 
-	public void showBountyError(String message)
+	// True once the loaded feed was generated at/after the given submit time, i.e. it already reflects
+	// that submission's outcome. Unparseable/absent feed -> false, so the optimistic state persists.
+	private boolean feedReflectsSubmit(long submittedAtMillis)
 	{
+		if (currentFeed == null)
+		{
+			return false;
+		}
+		final Instant generatedAt = parseInstant(currentFeed.getGeneratedAt());
+		return generatedAt != null && generatedAt.toEpochMilli() >= submittedAtMillis;
+	}
+
+	public void markBountyFailed(String bountyId, String message)
+	{
+		if (hasText(bountyId))
+		{
+			inFlightBounties.remove(bountyId);
+		}
 		bountyActionMessage = hasText(message) ? message : "Could not submit bounty.";
 		refreshBounties();
+	}
+
+	private void showProfileDetails()
+	{
+		profileList.removeAll();
+
+		if (currentPlayerName == null || currentPlayerName.trim().isEmpty())
+		{
+			setListMessage(profileList, profileStatus, "Log in to view your profile.");
+			setListMessage(pointHistoryList, pointHistoryStatus, "Log in to view point history.");
+			return;
+		}
+		if (!currentAccessAllowed)
+		{
+			setListMessage(profileList, profileStatus, "Available for LobsterPot clan members.");
+			setListMessage(pointHistoryList, pointHistoryStatus, "Available for LobsterPot clan members.");
+			return;
+		}
+		if (currentFeed == null)
+		{
+			setListMessage(profileList, profileStatus, "Loading profile...");
+			setListMessage(pointHistoryList, pointHistoryStatus, "Loading point history...");
+			return;
+		}
+
+		final FeedMember member = findMember(currentFeed, currentPlayerName);
+		if (member == null)
+		{
+			setListMessage(profileList, profileStatus, "No clan profile found for " + currentPlayerName + ".");
+			setListMessage(pointHistoryList, pointHistoryStatus, "No clan profile found.");
+			return;
+		}
+
+		profileStatus.setVisible(false);
+		profileList.add(detailsCard(member));
+		showPointHistory(member);
+		revalidate();
+		repaint();
+	}
+
+	private void showPointHistory(FeedMember member)
+	{
+		pointHistoryList.removeAll();
+		final List<PointHistoryEntry> history = member.getPointsHistory();
+		if (history.isEmpty())
+		{
+			setListMessage(pointHistoryList, pointHistoryStatus, "No point history yet.");
+			return;
+		}
+
+		pointHistoryStatus.setVisible(false);
+		for (int i = history.size() - 1; i >= 0; i--)
+		{
+			final PointHistoryEntry entry = history.get(i);
+			if (entry == null)
+			{
+				continue;
+			}
+			pointHistoryList.add(pointHistoryRow(entry));
+			pointHistoryList.add(verticalGap(6));
+		}
+		revalidate();
+		repaint();
+	}
+
+	private JPanel pointHistoryRow(PointHistoryEntry entry)
+	{
+		final JPanel row = card();
+		final Integer delta = entry.getDelta();
+		final String deltaText = delta == null ? "Points" : (delta >= 0 ? "+" : "") + formatInt(delta) + " pts";
+		final String balanceText = entry.getBalance() == null ? "" : "  (balance " + formatInt(entry.getBalance()) + ")";
+		row.add(statusLine(deltaText + balanceText, delta != null && delta < 0 ? DENIED_COLOR : ALLOWED_COLOR));
+		if (hasText(entry.getReason()))
+		{
+			row.add(wrappedCardLine(entry.getReason().trim(), Color.LIGHT_GRAY));
+		}
+		if (hasText(entry.getTimestamp()))
+		{
+			row.add(grayLine(formatDateLike(entry.getTimestamp())));
+		}
+		return row;
 	}
 
 	private JPanel broadcastRow(FeedBroadcast broadcast)
@@ -960,17 +1323,9 @@ public class LobsterPotPanel extends PluginPanel
 
 	private void setBountiesMessage(String message)
 	{
-		bountyList.removeAll();
-		if (!bountiesEnabled)
-		{
-			bountySection.setVisible(false);
-			return;
-		}
-		bountySection.setVisible(true);
-		bountyStatus.setVisible(true);
-		bountyStatus.setText(wrapped(message));
-		revalidate();
-		repaint();
+		setListMessage(bountyList, bountyStatus, message);
+		setListMessage(bountyClaimList, bountyClaimStatus, message);
+		setListMessage(bountyHistoryList, bountyHistoryStatus, message);
 	}
 
 	private void setDetailsExpanded(boolean expanded)

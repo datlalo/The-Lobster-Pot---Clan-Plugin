@@ -44,6 +44,9 @@ public class FeedMember
 	@SerializedName("pending_bounties")
 	private List<FeedPendingBounty> pendingBounties;
 
+	@SerializedName("points_history")
+	private List<PointHistoryEntry> pointsHistory;
+
 	public String getRsn()
 	{
 		return rsn;
@@ -107,5 +110,10 @@ public class FeedMember
 	public List<FeedPendingBounty> getPendingBounties()
 	{
 		return pendingBounties == null ? Collections.emptyList() : pendingBounties;
+	}
+
+	public List<PointHistoryEntry> getPointsHistory()
+	{
+		return pointsHistory == null ? Collections.emptyList() : pointsHistory;
 	}
 }

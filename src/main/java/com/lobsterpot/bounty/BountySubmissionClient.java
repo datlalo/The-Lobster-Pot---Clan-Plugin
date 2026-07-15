@@ -80,7 +80,9 @@ public class BountySubmissionClient
 						}
 					}
 
-					if (response.isSuccessful() && result != null)
+					// 409 = already submitted: the claim is in fact recorded, so treat it as success
+					// rather than an error. This makes a retry after a slow/false failure idempotent.
+					if ((response.isSuccessful() || response.code() == 409) && result != null)
 					{
 						callback.onSuccess(result);
 						return;
